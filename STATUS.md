@@ -62,6 +62,10 @@ cross-platform release automation, both deferred per SPEC).
 
 ## Next steps (post-Phase 7)
 
+- 2026-05-16 — Model IDs are configurable through flags, env, or `fsdtrace.yaml`.
+  Resolution order is `flag > env > config file > default`; supported env vars:
+  `FSDTRACE_EMBEDDING_MODEL`, `FSDTRACE_ATOMIZER_MODEL`,
+  `FSDTRACE_JUDGMENT_MODEL`, and `FSDTRACE_REJUDGE_MODEL`.
 - Wire a real Bedrock cassette for the Phase 1 `make smoke` end-to-end (currently it just runs `init`). Best done when the smoke needs to exercise live judgment too.
 - Phase 7 leaves Grafana/ClickHouse for a future request. The data already lives in SQLite and the JSON report is lossless, so a downstream consumer can pick it up at any time.
 - Once a real Spring repo + `scip-java` are available, exercise the live SCIP merge path to confirm `relationships` populate as expected.

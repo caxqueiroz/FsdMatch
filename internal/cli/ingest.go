@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -50,6 +49,13 @@ and offline smoke runs.`,
 			ctx, cancel := signalCtx()
 			defer cancel()
 
+			cfg, err := loadAppConfig(opts.cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			embeddingModel := cfg.model(modelEmbedding, embeddingModel, cmd.Flags().Changed("embedding-model"))
+			atomizerModel := cfg.model(modelAtomizer, atomizerModel, cmd.Flags().Changed("atomizer-model"))
+
 			path := args[0]
 			chunks, err := fsd.ParseFile(path, anchorPattern)
 			if err != nil {
@@ -68,7 +74,7 @@ and offline smoke runs.`,
 				return err
 			}
 
-			bedrock, err := newBedrockClient(cassettePath)
+			bedrock, err := newBedrockClient(cassettePath, cfg)
 			if err != nil {
 				return err
 			}
@@ -92,15 +98,15 @@ and offline smoke runs.`,
 		},
 	}
 	c.Flags().StringVar(&anchorPattern, "anchor-pattern", fsd.DefaultAnchorPattern, "regex used to split chunks")
-	c.Flags().StringVar(&atomizerModel, "atomizer-model", fsd.DefaultAtomizerModel, "Bedrock Claude model id for atomization")
-	c.Flags().StringVar(&embeddingModel, "embedding-model", embed.TitanModelID, "Bedrock Titan model id for embeddings")
+	c.Flags().StringVar(&atomizerModel, "atomizer-model", "", "Bedrock Claude model id for atomization (flag > env > config > default)")
+	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return c
 }
 
 // newBedrockClient builds a BedrockClient honouring the env variable
 // and an optional cassette file.
-func newBedrockClient(cassettePath string) (*embed.BedrockClient, error) {
+func newBedrockClient(cassettePath string, cfg appConfig) (*embed.BedrockClient, error) {
 	if cassettePath != "" {
 		cas, err := embed.LoadCassette(cassettePath)
 		if err != nil {
@@ -110,7 +116,7 @@ func newBedrockClient(cassettePath string) (*embed.BedrockClient, error) {
 		return embed.NewClient("https://cassette.local",
 			embed.WithHTTPClient(cas.HTTPClient()))
 	}
-	base := os.Getenv(EnvBedrockBaseURL)
+	base := cfg.bedrockURL()
 	if base == "" {
 		return nil, fmt.Errorf("%s is unset; set it to the KrakenD route or pass --cassette",
 			EnvBedrockBaseURL)

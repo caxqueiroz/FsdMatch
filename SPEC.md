@@ -395,7 +395,9 @@ bedrock:
   base_url: https://krakend.internal/v1/bedrock
   region: us-east-1
   embedding_model: amazon.titan-embed-text-v2:0
+  atomizer_model: anthropic.claude-sonnet-4-v2:0
   judgment_model: anthropic.claude-sonnet-4-v2:0
+  rejudge_model: anthropic.claude-opus-4-v2:0
   rejudge_drifts: false
   token_budget: 2000000
 fsd:
@@ -409,6 +411,11 @@ matcher:
 mcp:
   transport: stdio
 ```
+
+Model resolution order is `flag > env > config file > default`.
+Supported model env vars:
+`FSDTRACE_EMBEDDING_MODEL`, `FSDTRACE_ATOMIZER_MODEL`,
+`FSDTRACE_JUDGMENT_MODEL`, and `FSDTRACE_REJUDGE_MODEL`.
 
 ---
 

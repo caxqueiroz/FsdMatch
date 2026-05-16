@@ -48,6 +48,12 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 			ctx, cancel := signalCtx()
 			defer cancel()
 
+			cfg, err := loadAppConfig(opts.cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			embeddingModel := cfg.model(modelEmbedding, embeddingModel, cmd.Flags().Changed("embedding-model"))
+
 			repoRoot, err := filepath.Abs(args[0])
 			if err != nil {
 				return err
@@ -69,7 +75,7 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 				return err
 			}
 
-			bedrock, err := newBedrockClient(cassettePath)
+			bedrock, err := newBedrockClient(cassettePath, cfg)
 			if err != nil {
 				return err
 			}
@@ -105,7 +111,7 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 	c.Flags().StringVar(&scipIndexPath, "scip-index", "", "path to a pre-existing index.scip (skips scip-java)")
 	c.Flags().BoolVar(&runScipJava, "run-scip-java", false, "shell out to scip-java in the repo first")
 	c.Flags().StringVar(&scipJavaBin, "scip-java-bin", "scip-java", "scip-java executable name")
-	c.Flags().StringVar(&embeddingModel, "embedding-model", embed.TitanModelID, "Bedrock Titan model id for embeddings")
+	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return c
 }

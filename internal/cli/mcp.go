@@ -37,13 +37,24 @@ Transports:
                     Server-Sent Events. Use this for remote setups
                     (e.g. claude.ai/code over a tunnel).
 `,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := signalCtx()
 			defer cancel()
 
+			cfg, err := loadAppConfig(opts.cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			baseURL := cfg.bedrockURL()
+			if cmd.Flags().Changed("bedrock-base-url") && bedrockBaseURL != "" {
+				baseURL = bedrockBaseURL
+			}
+			embeddingModel := cfg.model(modelEmbedding, embeddingModel, cmd.Flags().Changed("embedding-model"))
+			judgmentModel := cfg.model(modelJudgment, judgmentModel, cmd.Flags().Changed("judgment-model"))
+
 			srv, state := mcp.NewServer(mcp.Config{
 				DBPath:         opts.dbPath,
-				BedrockBaseURL: bedrockBaseURL,
+				BedrockBaseURL: baseURL,
 				EmbeddingModel: embeddingModel,
 				JudgmentModel:  judgmentModel,
 			})
@@ -60,9 +71,9 @@ Transports:
 	}
 	serve.Flags().StringVar(&transport, "transport", "stdio", "transport: stdio|sse")
 	serve.Flags().StringVar(&addr, "addr", "127.0.0.1:8765", "address to bind for sse transport")
-	serve.Flags().StringVar(&bedrockBaseURL, "bedrock-base-url", "", "Bedrock route (env BEDROCK_BASE_URL when unset)")
-	serve.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id (default amazon.titan-embed-text-v2:0)")
-	serve.Flags().StringVar(&judgmentModel, "judgment-model", "", "Bedrock Claude model id for fsd_rematch_feature")
+	serve.Flags().StringVar(&bedrockBaseURL, "bedrock-base-url", "", "Bedrock route (flag > env > config)")
+	serve.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id (flag > env > config > default)")
+	serve.Flags().StringVar(&judgmentModel, "judgment-model", "", "Bedrock Claude model id for fsd_rematch_feature (flag > env > config > default)")
 	cmd.AddCommand(serve)
 	return cmd
 }

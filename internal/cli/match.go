@@ -34,6 +34,14 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 			ctx, cancel := signalCtx()
 			defer cancel()
 
+			cfg, err := loadAppConfig(opts.cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			embeddingModel := cfg.model(modelEmbedding, embeddingModel, cmd.Flags().Changed("embedding-model"))
+			judgmentModel := cfg.model(modelJudgment, judgmentModel, cmd.Flags().Changed("judgment-model"))
+			rejudgeModel := cfg.model(modelRejudge, rejudgeModel, cmd.Flags().Changed("rejudge-model"))
+
 			d, err := db.Open(ctx, opts.dbPath)
 			if err != nil {
 				return fmt.Errorf("opening db: %w", err)
@@ -43,7 +51,7 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 				return err
 			}
 
-			bedrock, err := newBedrockClient(cassettePath)
+			bedrock, err := newBedrockClient(cassettePath, cfg)
 			if err != nil {
 				return err
 			}
@@ -88,10 +96,10 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 	}
 	cmd.Flags().StringVar(&feature, "fr", "", "match a single feature ID, e.g. FR-042")
 	cmd.Flags().IntVar(&topK, "top-k", match.DefaultTopK, "vec0 KNN candidates to consider per FR")
-	cmd.Flags().StringVar(&judgmentModel, "judgment-model", match.DefaultJudgmentModel, "Bedrock Claude model id for judgment")
-	cmd.Flags().StringVar(&embeddingModel, "embedding-model", embed.TitanModelID, "Bedrock Titan model id for embeddings")
+	cmd.Flags().StringVar(&judgmentModel, "judgment-model", "", "Bedrock Claude model id for judgment (flag > env > config > default)")
+	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
 	cmd.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	cmd.Flags().BoolVar(&rejudgeDrifts, "rejudge-drifts", false, "after the first pass, re-judge every drifts verdict with --rejudge-model (SPEC §7.4)")
-	cmd.Flags().StringVar(&rejudgeModel, "rejudge-model", "anthropic.claude-opus-4-v2:0", "stronger Bedrock Claude model used for the --rejudge-drifts second pass")
+	cmd.Flags().StringVar(&rejudgeModel, "rejudge-model", "", "stronger Bedrock Claude model used for the --rejudge-drifts second pass (flag > env > config > default)")
 	return cmd
 }
