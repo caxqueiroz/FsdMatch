@@ -60,6 +60,14 @@ cross-platform release automation, both deferred per SPEC).
 
 - None blocking under the CGO-enabled build contract. Cross-platform release automation remains deferred until target C toolchains are configured.
 
+## Post-Phase 7 maintenance
+
+- 2026-05-16 — Implemented `fsdtrace embed`. The command now repopulates
+  `feature_vec` and/or `artifact_vec` for existing rows, honours
+  `--what features|artifacts|all`, `--embedding-model`, and `--cassette`,
+  and writes vec rows through `internal/db.Writer`. Added CLI regression
+  coverage for vector population and invalid `--what` validation.
+
 ## Next steps (post-Phase 7)
 
 - 2026-05-16 — Model IDs are configurable through flags, env, or `fsdtrace.yaml`.

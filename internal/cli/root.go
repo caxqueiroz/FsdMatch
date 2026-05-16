@@ -1,12 +1,9 @@
 // Package cli wires the cobra command tree. Subcommands live in this
-// package as separate files for readability; only `init` has a full
-// implementation in Phase 1, the rest are stubs that return
-// errNotImplemented and document themselves.
+// package as separate files for readability.
 package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,11 +22,6 @@ type globalOpts struct {
 }
 
 var opts globalOpts
-
-// errNotImplemented is returned by every subcommand whose implementation
-// belongs to a future phase. It carries no stack — Cobra prints it
-// verbatim so the user sees a clean message.
-var errNotImplemented = errors.New("not implemented in this phase")
 
 // NewRootCmd returns the top-level fsdtrace command.
 func NewRootCmd() *cobra.Command {
