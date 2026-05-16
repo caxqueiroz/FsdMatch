@@ -74,6 +74,9 @@ cross-platform release automation, both deferred per SPEC).
 - 2026-05-16 — Tracked the synthetic `testdata/` fixtures required by
   the parser, atomizer, and Spring harvester tests. They were present
   locally but ignored, which made CI fail with missing fixture paths.
+- 2026-05-16 — Added `README.md` with build/pipeline basics and a
+  `scip-java` section explaining its role in semantic Java indexing and
+  call graph relationship population.
 
 ## Next steps (post-Phase 7)
 
