@@ -71,6 +71,9 @@ cross-platform release automation, both deferred per SPEC).
   `golangci-lint` install script failed checksum verification on
   `v2.12.2`. CI now uses the official `golangci/golangci-lint-action`
   pinned to the same linter version.
+- 2026-05-16 — Tracked the synthetic `testdata/` fixtures required by
+  the parser, atomizer, and Spring harvester tests. They were present
+  locally but ignored, which made CI fail with missing fixture paths.
 
 ## Next steps (post-Phase 7)
 
