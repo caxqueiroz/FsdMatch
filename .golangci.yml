@@ -1,0 +1,61 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosec
+    - revive
+    - misspell
+    - unconvert
+    - bodyclose
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - prealloc
+    - nestif
+    - gocritic
+  settings:
+    nestif:
+      min-complexity: 5
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: receiver-naming
+        - name: increment-decrement
+        - name: range
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: unused-parameter
+          disabled: true
+    gosec:
+      excludes:
+        - G404
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/cax/fsdtrace

@@ -1,0 +1,5 @@
+dist/
+fsdtrace.db
+bin/
+
+testdata/
