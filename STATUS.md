@@ -67,6 +67,10 @@ cross-platform release automation, both deferred per SPEC).
   `--what features|artifacts|all`, `--embedding-model`, and `--cassette`,
   and writes vec rows through `internal/db.Writer`. Added CLI regression
   coverage for vector population and invalid `--what` validation.
+- 2026-05-16 — Fixed GitHub Actions CI after the manual
+  `golangci-lint` install script failed checksum verification on
+  `v2.12.2`. CI now uses the official `golangci/golangci-lint-action`
+  pinned to the same linter version.
 
 ## Next steps (post-Phase 7)
 
