@@ -88,6 +88,13 @@ func (g *concurrentGenerator) Generate(ctx context.Context, _ llm.GenerateReques
 	return "[]", nil
 }
 
+type failingGenerator struct{ calls atomic.Int64 }
+
+func (g *failingGenerator) Generate(_ context.Context, _ llm.GenerateRequest) (string, error) {
+	g.calls.Add(1)
+	return "", fmt.Errorf("unexpected judge call")
+}
+
 func extractCandidateIDs(prompt string) []int64 {
 	re := regexp.MustCompile(`\[(\d+)\] kind=`)
 	matches := re.FindAllStringSubmatch(prompt, -1)
@@ -339,6 +346,48 @@ func TestPipelineMatchAllHonorsConcurrency(t *testing.T) {
 	}
 	if got, want := summary.TotalMatches, 4; got != want {
 		t.Fatalf("total matches = %d, want %d", got, want)
+	}
+}
+
+func TestPipelineResumeSkipsFeaturesWithExistingMatches(t *testing.T) {
+	ctx := context.Background()
+	d := setupPipelineDB(t)
+	seedFeature(t, d, "FR-010", "Create owner", "User creates an owner", []string{"POST /owners"})
+	_ = seedArtifact(t, d, "rest_endpoint", "POST /owners", "OwnerController.java", 10, 20)
+
+	gen := &batchGenerator{}
+	pipe := NewPipeline(d, gen, &fakeEmbedder{}, WithTopK(1))
+	if _, err := pipe.MatchAll(ctx, "resume-match", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(gen.calls) != 1 {
+		t.Fatalf("initial judge calls = %d, want 1", len(gen.calls))
+	}
+
+	failing := &failingGenerator{}
+	progress := make([]int, 0, 1)
+	resumePipe := NewPipeline(d, failing, &fakeEmbedder{},
+		WithTopK(1),
+		WithResume(true),
+		WithProgress(func(done, total int) {
+			if total != 1 {
+				t.Errorf("progress total = %d, want 1", total)
+			}
+			progress = append(progress, done)
+		}),
+	)
+	summary, err := resumePipe.MatchAll(ctx, "resume-match", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.SkippedFeatures != 1 || summary.TotalMatches != 0 {
+		t.Fatalf("resume summary = %+v, want one skipped feature and no new matches", summary)
+	}
+	if got := failing.calls.Load(); got != 0 {
+		t.Fatalf("resume made %d judge calls", got)
+	}
+	if len(progress) != 1 || progress[0] != 1 {
+		t.Fatalf("progress callbacks = %v, want [1]", progress)
 	}
 }
 

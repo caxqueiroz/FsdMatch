@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -71,6 +72,8 @@ type Atomizer struct {
 	model     string
 	maxTok    int
 	logger    *slog.Logger
+	resume    bool
+	progress  func(done, total int)
 }
 
 // AtomizerOption configures an Atomizer.
@@ -84,6 +87,18 @@ func WithMaxTokens(n int) AtomizerOption { return func(a *Atomizer) { a.maxTok =
 
 // WithLogger overrides the default logger.
 func WithLogger(l *slog.Logger) AtomizerOption { return func(a *Atomizer) { a.logger = l } }
+
+// WithResume skips chunks that already have a persisted feature and
+// vector for the same run.
+func WithResume(resume bool) AtomizerOption {
+	return func(a *Atomizer) { a.resume = resume }
+}
+
+// WithProgress receives progress updates after each chunk is skipped or
+// persisted.
+func WithProgress(fn func(done, total int)) AtomizerOption {
+	return func(a *Atomizer) { a.progress = fn }
+}
 
 // NewAtomizer constructs an Atomizer.
 func NewAtomizer(d *db.DB, generator llm.Generator, embedder embed.Embedder, opts ...AtomizerOption) *Atomizer {
@@ -118,7 +133,19 @@ func (a *Atomizer) Ingest(ctx context.Context, chunks []Chunk, runID string) (*I
 	}
 	out := &IngestResult{RunID: runID, Features: make([]Feature, 0, len(chunks))}
 
-	for _, ch := range chunks {
+	total := len(chunks)
+	for i, ch := range chunks {
+		if a.resume {
+			f, ok, err := a.loadCompleteFeature(ctx, ch.Anchor, runID)
+			if err != nil {
+				return nil, fmt.Errorf("resume %s: %w", ch.Anchor, err)
+			}
+			if ok {
+				out.Features = append(out.Features, f)
+				a.reportProgress(i+1, total)
+				continue
+			}
+		}
 		f, err := a.atomizeChunk(ctx, ch)
 		if err != nil {
 			return nil, fmt.Errorf("atomize %s: %w", ch.Anchor, err)
@@ -138,8 +165,15 @@ func (a *Atomizer) Ingest(ctx context.Context, chunks []Chunk, runID string) (*I
 		a.logger.InfoContext(ctx, "atomized FR",
 			"id", f.ID, "title", f.Title, "section", f.FSDSection,
 			"run_id", runID, "prompt_version", AtomizerPromptVersion)
+		a.reportProgress(i+1, total)
 	}
 	return out, nil
+}
+
+func (a *Atomizer) reportProgress(done, total int) {
+	if a.progress != nil {
+		a.progress(done, total)
+	}
 }
 
 func (a *Atomizer) atomizeChunk(ctx context.Context, ch Chunk) (Feature, error) {
@@ -250,6 +284,82 @@ func (a *Atomizer) writeFeature(ctx context.Context, f Feature, v []float32, run
 		}
 		return nil
 	})
+}
+
+func (a *Atomizer) loadCompleteFeature(ctx context.Context, anchor, runID string) (Feature, bool, error) {
+	var (
+		f             Feature
+		acceptance    string
+		inputs        sql.NullString
+		outputs       sql.NullString
+		sideEffects   sql.NullString
+		nonFunctional sql.NullString
+		actor         sql.NullString
+	)
+	err := a.d.SQL().QueryRowContext(ctx, `
+		SELECT id, title, description, acceptance, actor, inputs, outputs,
+		       side_effects, non_functional, COALESCE(fsd_section, ''), COALESCE(fsd_anchor, '')
+		  FROM features
+		 WHERE fsd_anchor = ? AND run_id = ?
+		 ORDER BY id
+		 LIMIT 1`, anchor, runID).Scan(
+		&f.ID, &f.Title, &f.Description, &acceptance, &actor, &inputs, &outputs,
+		&sideEffects, &nonFunctional, &f.FSDSection, &f.FSDAnchor,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Feature{}, false, nil
+	}
+	if err != nil {
+		return Feature{}, false, err
+	}
+	var vectorCount int
+	if err := a.d.SQL().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM feature_vec WHERE rowid = ?`,
+		FeatureRowID(f.ID)).Scan(&vectorCount); err != nil {
+		return Feature{}, false, err
+	}
+	if vectorCount == 0 {
+		return Feature{}, false, nil
+	}
+	if actor.Valid && actor.String != "" {
+		f.Actor = &actor.String
+	}
+	var errDecode error
+	if f.Acceptance, errDecode = decodeStrings(acceptance); errDecode != nil {
+		return Feature{}, false, fmt.Errorf("decode acceptance for %s: %w", f.ID, errDecode)
+	}
+	if f.Inputs, errDecode = decodeNullableStrings(inputs); errDecode != nil {
+		return Feature{}, false, fmt.Errorf("decode inputs for %s: %w", f.ID, errDecode)
+	}
+	if f.Outputs, errDecode = decodeNullableStrings(outputs); errDecode != nil {
+		return Feature{}, false, fmt.Errorf("decode outputs for %s: %w", f.ID, errDecode)
+	}
+	if f.SideEffects, errDecode = decodeNullableStrings(sideEffects); errDecode != nil {
+		return Feature{}, false, fmt.Errorf("decode side effects for %s: %w", f.ID, errDecode)
+	}
+	if f.NonFunctional, errDecode = decodeNullableStrings(nonFunctional); errDecode != nil {
+		return Feature{}, false, fmt.Errorf("decode non-functional for %s: %w", f.ID, errDecode)
+	}
+	return f, true, nil
+}
+
+func decodeNullableStrings(v sql.NullString) ([]string, error) {
+	if !v.Valid {
+		return nil, nil
+	}
+	return decodeStrings(v.String)
+}
+
+func decodeStrings(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func orEmpty(s []string) []string {

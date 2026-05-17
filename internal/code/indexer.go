@@ -20,16 +20,36 @@ type Indexer struct {
 	embedder embed.Embedder
 	cache    *embed.Cache
 	logger   *slog.Logger
+	resume   bool
+	progress func(done, total int)
+}
+
+// IndexerOption configures an Indexer.
+type IndexerOption func(*Indexer)
+
+// WithResume skips already-written artifacts and vectors for the same run.
+func WithResume(resume bool) IndexerOption {
+	return func(ix *Indexer) { ix.resume = resume }
+}
+
+// WithProgress receives progress updates after each artifact vector is
+// skipped or persisted.
+func WithProgress(fn func(done, total int)) IndexerOption {
+	return func(ix *Indexer) { ix.progress = fn }
 }
 
 // NewIndexer constructs an Indexer.
-func NewIndexer(d *db.DB, embedder embed.Embedder) *Indexer {
-	return &Indexer{
+func NewIndexer(d *db.DB, embedder embed.Embedder, opts ...IndexerOption) *Indexer {
+	ix := &Indexer{
 		d:        d,
 		embedder: embedder,
 		cache:    embed.NewCache(d),
 		logger:   slog.Default(),
 	}
+	for _, o := range opts {
+		o(ix)
+	}
+	return ix
 }
 
 // IndexResult is the per-run summary returned by Index.
@@ -69,8 +89,10 @@ func (ix *Indexer) Index(ctx context.Context, repoRoot, scipIndexPath, runID str
 
 	// Wipe prior rows for this repo's path so re-runs stay idempotent
 	// without leaking deletions across unrelated runs.
-	if err := ix.purgePreviousRows(ctx, repoRoot); err != nil {
-		return nil, err
+	if !ix.resume {
+		if err := ix.purgePreviousRows(ctx, repoRoot); err != nil {
+			return nil, err
+		}
 	}
 
 	rowIDs, err := ix.writeArtifacts(ctx, arts, runID)
@@ -79,6 +101,11 @@ func (ix *Indexer) Index(ctx context.Context, repoRoot, scipIndexPath, runID str
 	}
 	if err := ix.embedArtifacts(ctx, arts, rowIDs); err != nil {
 		return nil, err
+	}
+	if ix.resume {
+		if err := ix.purgeRunDerivedRows(ctx, repoRoot, runID); err != nil {
+			return nil, err
+		}
 	}
 	if err := ix.writeTests(ctx, tests, arts, rowIDs, runID); err != nil {
 		return nil, err
@@ -99,6 +126,25 @@ func (ix *Indexer) Index(ctx context.Context, repoRoot, scipIndexPath, runID str
 		RelationCount: relations,
 		ScipMerged:    scipMerged,
 	}, nil
+}
+
+func (ix *Indexer) purgeRunDerivedRows(ctx context.Context, repoRoot, runID string) error {
+	prefix := strings.TrimSuffix(repoRoot, "/") + "/"
+	return ix.d.Writer().Submit(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM tests WHERE run_id = ? AND
+			  (file LIKE ? OR target_artifact IN
+			    (SELECT id FROM code_artifacts WHERE run_id = ? AND file LIKE ?))`,
+			runID, prefix+"%", runID, prefix+"%"); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`DELETE FROM relationships WHERE
+			   from_artifact IN (SELECT id FROM code_artifacts WHERE run_id = ? AND file LIKE ?) OR
+			   to_artifact   IN (SELECT id FROM code_artifacts WHERE run_id = ? AND file LIKE ?)`,
+			runID, prefix+"%", runID, prefix+"%")
+		return err
+	})
 }
 
 // purgePreviousRows wipes prior rows whose `file` lives under the
@@ -159,10 +205,46 @@ func (ix *Indexer) writeArtifacts(ctx context.Context, arts []Artifact, runID st
 		}
 		defer func() { _ = stmt.Close() }()
 
+		updateStmt, err := tx.PrepareContext(ctx, `
+			UPDATE code_artifacts
+			   SET scip_symbol = ?, package = ?, class = ?, method = ?,
+			       signature = ?, annotations = ?, source = ?, run_id = ?
+			 WHERE id = ?
+		`)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = updateStmt.Close() }()
+
 		for i, a := range arts {
 			ann, err := json.Marshal(a.Annotations)
 			if err != nil {
 				return err
+			}
+			if ix.resume {
+				var id int64
+				err := tx.QueryRowContext(ctx, `
+					SELECT id
+					  FROM code_artifacts
+					 WHERE run_id = ? AND kind = ? AND identifier = ? AND file = ?
+					   AND start_line = ? AND end_line = ?
+					 ORDER BY id
+					 LIMIT 1`,
+					runID, a.Kind, a.Identifier, a.File, a.StartLine, a.EndLine,
+				).Scan(&id)
+				if err != nil && err != sql.ErrNoRows {
+					return err
+				}
+				if err == nil {
+					if _, err := updateStmt.ExecContext(ctx,
+						a.ScipSymbol, a.Package, a.Class, a.Method,
+						a.Signature, string(ann), a.Source, runID, id,
+					); err != nil {
+						return err
+					}
+					rowIDs[i] = id
+					continue
+				}
 			}
 			res, err := stmt.ExecContext(ctx,
 				a.Kind, a.Identifier, a.ScipSymbol,
@@ -187,14 +269,25 @@ func (ix *Indexer) writeArtifacts(ctx context.Context, arts []Artifact, runID st
 // embedArtifacts computes one vector per artifact via the cache and
 // inserts into artifact_vec.
 func (ix *Indexer) embedArtifacts(ctx context.Context, arts []Artifact, rowIDs []int64) error {
+	total := len(arts)
 	for i, a := range arts {
+		rowID := rowIDs[i]
+		if ix.resume {
+			ok, err := ix.artifactVectorExists(ctx, rowID)
+			if err != nil {
+				return err
+			}
+			if ok {
+				ix.reportProgress(i+1, total)
+				continue
+			}
+		}
 		text := EmbeddingText(a)
 		v, err := embed.Cached(ctx, ix.embedder, ix.cache, text)
 		if err != nil {
 			return fmt.Errorf("embed artifact %s: %w", a.Identifier, err)
 		}
 		blob := db.PackFloat32(v)
-		rowID := rowIDs[i]
 		if err := ix.d.Writer().Submit(ctx, func(tx *sql.Tx) error {
 			if _, err := tx.ExecContext(ctx,
 				`DELETE FROM artifact_vec WHERE rowid = ?`, rowID); err != nil {
@@ -206,8 +299,24 @@ func (ix *Indexer) embedArtifacts(ctx context.Context, arts []Artifact, rowIDs [
 		}); err != nil {
 			return err
 		}
+		ix.reportProgress(i+1, total)
 	}
 	return nil
+}
+
+func (ix *Indexer) artifactVectorExists(ctx context.Context, rowID int64) (bool, error) {
+	var n int
+	if err := ix.d.SQL().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM artifact_vec WHERE rowid = ?`, rowID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (ix *Indexer) reportProgress(done, total int) {
+	if ix.progress != nil {
+		ix.progress(done, total)
+	}
 }
 
 // EmbeddingText is the canonical text fed to the embedding model for an artifact.

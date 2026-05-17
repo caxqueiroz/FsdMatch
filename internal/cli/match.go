@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,6 +23,7 @@ func newMatchCmd() *cobra.Command {
 		embeddingModel   string
 		cassettePath     string
 		providerFlag     string
+		resume           bool
 	)
 	cmd := &cobra.Command{
 		Use:   "match",
@@ -35,6 +37,9 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := signalCtx()
 			defer cancel()
+			if resume && opts.runID == "" {
+				return errors.New("--resume requires --run-id")
+			}
 
 			cfg, err := loadAppConfig(opts.cfgPath, nil)
 			if err != nil {
@@ -70,6 +75,7 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 				match.WithTopK(topK),
 				match.WithMatchConcurrency(matchConcurrency),
 				match.WithJudgmentModel(judgmentModel),
+				match.WithResume(resume),
 			}
 			if provider == ProviderOpenAI {
 				pipeOpts = append(pipeOpts,
@@ -77,6 +83,9 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 					match.WithJudgmentBatchSize(openAIJudgmentBatchSize),
 				)
 			}
+			progress := newProgress(cmd.ErrOrStderr(), "match")
+			defer progress.Finish()
+			pipeOpts = append(pipeOpts, match.WithProgress(progress.Advance))
 			pipe := match.NewPipeline(d, generator, emb, pipeOpts...)
 
 			runID := opts.runID
@@ -92,11 +101,20 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 			if err != nil {
 				return err
 			}
-			if _, err := fmt.Fprintf(cmd.OutOrStdout(),
-				"matched %d candidates (run %s): implements=%d drifts=%d unrelated=%d tested=%d\n",
-				summary.TotalMatches, summary.RunID,
-				summary.Implements, summary.Drifts, summary.Unrelated, summary.Tested); err != nil {
-				return err
+			if summary.SkippedFeatures > 0 {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(),
+					"matched %d candidates (run %s): implements=%d drifts=%d unrelated=%d tested=%d skipped_features=%d\n",
+					summary.TotalMatches, summary.RunID,
+					summary.Implements, summary.Drifts, summary.Unrelated, summary.Tested, summary.SkippedFeatures); err != nil {
+					return err
+				}
+			} else {
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(),
+					"matched %d candidates (run %s): implements=%d drifts=%d unrelated=%d tested=%d\n",
+					summary.TotalMatches, summary.RunID,
+					summary.Implements, summary.Drifts, summary.Unrelated, summary.Tested); err != nil {
+					return err
+				}
 			}
 
 			if rejudgeDrifts {
@@ -119,6 +137,7 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 	cmd.Flags().StringVar(&judgmentModel, "judgment-model", "", "model id for judgment (flag > env > config > provider default)")
 	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	cmd.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
+	cmd.Flags().BoolVar(&resume, "resume", false, "skip FRs already matched for --run-id")
 	cmd.Flags().BoolVar(&rejudgeDrifts, "rejudge-drifts", false, "after the first pass, re-judge every drifts verdict with --rejudge-model (SPEC §7.4)")
 	cmd.Flags().StringVar(&rejudgeModel, "rejudge-model", "", "stronger model used for the --rejudge-drifts second pass (flag > env > config > provider default)")
 	return cmd

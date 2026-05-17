@@ -15,15 +15,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/cax/fsdtrace/internal/retry"
 )
 
-// MaxRetries is the per-request cap on retry attempts for 429/503 responses.
-const MaxRetries = 5
+// MaxRetries is the per-request cap on retry attempts for 429/5xx responses.
+const MaxRetries = retry.MaxRetries
 
 // HTTPDoer is the subset of *http.Client we actually use, so tests can
 // substitute an httptest.Server-backed client transparently.
@@ -73,7 +74,6 @@ func NewClient(baseURL string, opts ...ClientOption) (*BedrockClient, error) {
 		http:    &http.Client{Timeout: 60 * time.Second},
 		logger:  slog.Default(),
 		nowFn:   time.Now,
-		sleepFn: time.Sleep,
 	}
 	for _, o := range opts {
 		o(c)
@@ -82,8 +82,8 @@ func NewClient(baseURL string, opts ...ClientOption) (*BedrockClient, error) {
 }
 
 // Invoke POSTs body to /model/{modelID}/invoke and unmarshals the JSON
-// response into out. Retries on 429/503 with capped exponential backoff
-// + jitter.
+// response into out. Retries on 429/5xx with capped exponential backoff
+// + jitter, honoring Retry-After when present.
 func (c *BedrockClient) Invoke(ctx context.Context, modelID string, body any, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -92,21 +92,29 @@ func (c *BedrockClient) Invoke(ctx context.Context, modelID string, body any, ou
 	endpoint := fmt.Sprintf("%s/model/%s/invoke", c.baseURL, url.PathEscape(modelID))
 
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
-		respBody, status, err := c.doOnce(ctx, endpoint, payload)
+		respBody, status, header, err := c.doOnce(ctx, endpoint, payload)
 		switch {
 		case err != nil:
+			if ctx.Err() != nil {
+				return fmt.Errorf("bedrock: %s: %w", modelID, ctx.Err())
+			}
 			if attempt == MaxRetries {
 				return fmt.Errorf("bedrock: %s: %w", modelID, err)
 			}
-			c.sleepFn(backoff(attempt))
+			if err := retry.Sleep(ctx, c.sleepFn, retry.Backoff(attempt)); err != nil {
+				return fmt.Errorf("bedrock: %s: %w", modelID, err)
+			}
 			continue
-		case status == http.StatusTooManyRequests, status == http.StatusServiceUnavailable:
+		case retry.RetryableStatus(status):
 			if attempt == MaxRetries {
 				return fmt.Errorf("bedrock: %s: HTTP %d after %d retries", modelID, status, attempt)
 			}
 			c.logger.WarnContext(ctx, "bedrock retryable status",
 				"model", modelID, "status", status, "attempt", attempt)
-			c.sleepFn(backoff(attempt))
+			delay := retry.Delay(attempt, header.Get("Retry-After"), c.nowFn)
+			if err := retry.Sleep(ctx, c.sleepFn, delay); err != nil {
+				return fmt.Errorf("bedrock: %s: %w", modelID, err)
+			}
 			continue
 		case status >= 400:
 			return fmt.Errorf("bedrock: %s: HTTP %d: %s", modelID, status, truncate(respBody, 512))
@@ -120,37 +128,25 @@ func (c *BedrockClient) Invoke(ctx context.Context, modelID string, body any, ou
 	return fmt.Errorf("bedrock: %s: retries exhausted", modelID)
 }
 
-func (c *BedrockClient) doOnce(ctx context.Context, endpoint string, payload []byte) ([]byte, int, error) {
+func (c *BedrockClient) doOnce(ctx context.Context, endpoint string, payload []byte) ([]byte, int, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("reading body: %w", err)
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("reading body: %w", err)
 	}
-	return body, resp.StatusCode, nil
-}
-
-// backoff returns 200ms, 400ms, 800ms, ... plus jitter, capped at 8s.
-func backoff(attempt int) time.Duration {
-	const base = 200 * time.Millisecond
-	d := base << attempt
-	if d > 8*time.Second {
-		d = 8 * time.Second
-	}
-	// up to ±25% jitter
-	jit := time.Duration(rand.Int64N(int64(d/2))) - d/4
-	return d + jit
+	return body, resp.StatusCode, resp.Header, nil
 }
 
 func truncate(b []byte, n int) string {

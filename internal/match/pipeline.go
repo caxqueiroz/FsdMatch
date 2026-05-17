@@ -30,6 +30,8 @@ type Pipeline struct {
 	matchConcurrency  int
 	topK              int
 	logger            *slog.Logger
+	resume            bool
+	progress          func(done, total int)
 }
 
 // PipelineOption configures a Pipeline.
@@ -76,6 +78,17 @@ func WithMatchConcurrency(n int) PipelineOption {
 			p.matchConcurrency = 1
 		}
 	}
+}
+
+// WithResume skips features that already have match rows for the run.
+func WithResume(resume bool) PipelineOption {
+	return func(p *Pipeline) { p.resume = resume }
+}
+
+// WithProgress receives progress updates after a feature is skipped or
+// successfully matched.
+func WithProgress(fn func(done, total int)) PipelineOption {
+	return func(p *Pipeline) { p.progress = fn }
 }
 
 // WithLogger overrides the default logger.
@@ -257,8 +270,27 @@ func (p *Pipeline) MatchAll(ctx context.Context, runID string, featureIDs []stri
 		return nil, err
 	}
 	summary := &RunSummary{RunID: runID}
+	total := len(frs)
+	done := 0
+	if p.resume {
+		completed, err := p.featuresWithMatches(ctx, runID)
+		if err != nil {
+			return nil, err
+		}
+		todo := frs[:0]
+		for _, fr := range frs {
+			if _, ok := completed[fr.ID]; ok {
+				summary.SkippedFeatures++
+				done++
+				p.reportProgress(done, total)
+				continue
+			}
+			todo = append(todo, fr)
+		}
+		frs = todo
+	}
 	if p.matchConcurrency > 1 && len(frs) > 1 {
-		return p.matchAllConcurrent(ctx, runID, frs, summary)
+		return p.matchAllConcurrent(ctx, runID, frs, summary, done, total)
 	}
 	for _, fr := range frs {
 		matches, err := p.MatchFeature(ctx, fr)
@@ -268,6 +300,8 @@ func (p *Pipeline) MatchAll(ctx context.Context, runID string, featureIDs []stri
 		if err := p.persistFeatureMatches(ctx, runID, fr, matches, summary); err != nil {
 			return summary, err
 		}
+		done++
+		p.reportProgress(done, total)
 	}
 	return summary, nil
 }
@@ -283,6 +317,8 @@ func (p *Pipeline) matchAllConcurrent(
 	runID string,
 	frs []FeatureRow,
 	summary *RunSummary,
+	done int,
+	total int,
 ) (*RunSummary, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -346,11 +382,19 @@ func (p *Pipeline) matchAllConcurrent(
 				cancel()
 			}
 		}
+		done++
+		p.reportProgress(done, total)
 	}
 	if firstErr != nil {
 		return summary, firstErr
 	}
 	return summary, nil
+}
+
+func (p *Pipeline) reportProgress(done, total int) {
+	if p.progress != nil {
+		p.progress(done, total)
+	}
 }
 
 func (p *Pipeline) persistFeatureMatches(
@@ -513,6 +557,24 @@ func (p *Pipeline) loadFeatures(ctx context.Context, only []string) ([]FeatureRo
 	return out, rows.Err()
 }
 
+func (p *Pipeline) featuresWithMatches(ctx context.Context, runID string) (map[string]struct{}, error) {
+	rows, err := p.d.SQL().QueryContext(ctx,
+		`SELECT DISTINCT feature_id FROM matches WHERE run_id = ?`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // decorateTests fills Match.Tested/TestCount by counting test rows
 // pointing at each artifact id in the result set.
 func (p *Pipeline) decorateTests(ctx context.Context, matches []Match) error {
@@ -605,12 +667,13 @@ func (p *Pipeline) writeMatches(ctx context.Context, runID string, matches []Mat
 
 // RunSummary aggregates per-verdict counts for one match run.
 type RunSummary struct {
-	RunID        string
-	TotalMatches int
-	Implements   int
-	Drifts       int
-	Unrelated    int
-	Tested       int
+	RunID           string
+	TotalMatches    int
+	Implements      int
+	Drifts          int
+	Unrelated       int
+	Tested          int
+	SkippedFeatures int
 }
 
 func (s *RunSummary) absorb(matches []Match) {

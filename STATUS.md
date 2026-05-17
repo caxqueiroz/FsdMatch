@@ -128,6 +128,12 @@ cross-platform release automation, both deferred per SPEC).
   `--include-call-graph` is enabled, each implemented match with support
   artifacts now shows a small dependency graph rooted at the matched artifact,
   alongside the existing precise file:line support rows.
+- 2026-05-18 — Added resilience for long live-provider runs. Bedrock and
+  OpenAI HTTP clients now retry `429` and all `5xx` responses up to five times,
+  honoring `Retry-After`. `ingest fsd`, `index code`, `match`, and
+  `trace github` now accept `--resume` with a stable `--run-id`; the GitHub
+  wrapper also requires `--checkout-dir` so artifact paths remain stable.
+  Interactive runs render stderr progress bars while stdout stays scriptable.
 
 ## Next steps (post-Phase 7)
 

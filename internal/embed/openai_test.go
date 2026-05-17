@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cax/fsdtrace/internal/db"
 )
@@ -54,5 +56,49 @@ func TestOpenAIEmbedderUsesEmbeddingsAPI(t *testing.T) {
 	}
 	if want := "openai:text-embedding-3-large#dim=1024"; emb.Model() != want {
 		t.Fatalf("Model() = %q, want %q", emb.Model(), want)
+	}
+}
+
+func TestOpenAIEmbedderRetries429And5xx(t *testing.T) {
+	var calls atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"rate_limit","message":"slow down"}}`))
+		case 2:
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"code":"bad_gateway","message":"temporary"}}`))
+		default:
+			_, _ = w.Write([]byte(`{
+				"object":"list",
+				"model":"text-embedding-3-large",
+				"data":[{"object":"embedding","index":0,"embedding":[1,2,3]}]
+			}`))
+		}
+	}))
+	t.Cleanup(ts.Close)
+
+	var slept []time.Duration
+	emb, err := NewOpenAIEmbedder("test-key", OpenAIEmbeddingModelID, PurposeDocument,
+		WithOpenAIEmbedderBaseURL(ts.URL),
+		WithOpenAIEmbedderHTTPClient(ts.Client()),
+		withOpenAIEmbedderClock(time.Now, func(d time.Duration) { slept = append(slept, d) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := emb.Embed(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0] != 1 {
+		t.Fatalf("embedding = %+v", got)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("calls = %d, want 3", calls.Load())
+	}
+	if len(slept) != 2 || slept[0] != time.Second {
+		t.Fatalf("sleep = %v, want first delay 1s", slept)
 	}
 }

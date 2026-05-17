@@ -31,6 +31,7 @@ func newIndexCodeCmd() *cobra.Command {
 		embeddingModel string
 		cassettePath   string
 		providerFlag   string
+		resume         bool
 	)
 	c := &cobra.Command{
 		Use:   "code <repo>",
@@ -50,6 +51,9 @@ with OPENAI_API_KEY. Cassettes are Bedrock-only.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalCtx()
 			defer cancel()
+			if resume && opts.runID == "" {
+				return errors.New("--resume requires --run-id")
+			}
 
 			cfg, err := loadAppConfig(opts.cfgPath, nil)
 			if err != nil {
@@ -87,7 +91,11 @@ with OPENAI_API_KEY. Cassettes are Bedrock-only.`,
 			if err != nil {
 				return err
 			}
-			indexer := code.NewIndexer(d, emb)
+			progress := newProgress(cmd.ErrOrStderr(), "index code")
+			defer progress.Finish()
+			indexer := code.NewIndexer(d, emb,
+				code.WithResume(resume),
+				code.WithProgress(progress.Advance))
 
 			scipPath := scipIndexPath
 			if runScipJava {
@@ -121,5 +129,6 @@ with OPENAI_API_KEY. Cassettes are Bedrock-only.`,
 	c.Flags().StringVar(&providerFlag, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
 	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
+	c.Flags().BoolVar(&resume, "resume", false, "skip code artifacts and vectors already completed for --run-id")
 	return c
 }

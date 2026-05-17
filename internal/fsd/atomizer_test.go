@@ -137,6 +137,93 @@ func TestAtomizerIngestSampleProducesFiveFeaturesAndVectors(t *testing.T) {
 	}
 }
 
+func TestAtomizerResumeSkipsCompletedFeatures(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBedrock{}
+	a, d, _ := setupAtomizer(t, fb)
+
+	chunks, err := ParseFile("../../testdata/fsd-sample.md", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Ingest(ctx, chunks, "resume-run"); err != nil {
+		t.Fatal(err)
+	}
+
+	preAtomize := fb.atomizeCalls.Load()
+	preEmbed := fb.embedCalls.Load()
+	progress := make([]int, 0, len(chunks))
+	resumeAtomizer := NewAtomizer(d, a.generator, a.embedder,
+		WithResume(true),
+		WithProgress(func(done, total int) {
+			if total != len(chunks) {
+				t.Errorf("progress total = %d, want %d", total, len(chunks))
+			}
+			progress = append(progress, done)
+		}),
+	)
+	res, err := resumeAtomizer.Ingest(ctx, chunks, "resume-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Features) != len(chunks) {
+		t.Fatalf("features = %d, want %d", len(res.Features), len(chunks))
+	}
+	if got := fb.atomizeCalls.Load(); got != preAtomize {
+		t.Fatalf("resume atomized %d extra chunks", got-preAtomize)
+	}
+	if got := fb.embedCalls.Load(); got != preEmbed {
+		t.Fatalf("resume embedded %d extra chunks", got-preEmbed)
+	}
+	if len(progress) != len(chunks) || progress[len(progress)-1] != len(chunks) {
+		t.Fatalf("progress callbacks = %v, want final %d", progress, len(chunks))
+	}
+}
+
+func TestAtomizerResumeSkipsCompletedChunks(t *testing.T) {
+	ctx := context.Background()
+	fb := &fakeBedrock{}
+	a, d, ts := setupAtomizer(t, fb)
+
+	chunks, err := ParseFile("../../testdata/fsd-sample.md", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Ingest(ctx, chunks[:2], "resume-run"); err != nil {
+		t.Fatal(err)
+	}
+	preAtomize := fb.atomizeCalls.Load()
+
+	bedrock, err := embed.NewClient(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var progressDone []int
+	resumeAtomizer := NewAtomizer(d,
+		llm.NewBedrockGenerator(bedrock),
+		embed.NewTitanEmbedder(bedrock, embed.TitanModelID),
+		WithResume(true),
+		WithProgress(func(done, _ int) {
+			progressDone = append(progressDone, done)
+		}),
+	)
+	res, err := resumeAtomizer.Ingest(ctx, chunks, "resume-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(res.Features), len(chunks); got != want {
+		t.Fatalf("features = %d, want %d", got, want)
+	}
+	if got, want := fb.atomizeCalls.Load()-preAtomize, int64(len(chunks)-2); got != want {
+		t.Fatalf("resume atomized %d chunks, want %d", got, want)
+	}
+	assertRowCount(t, d, "features", len(chunks))
+	assertRowCount(t, d, "feature_vec", len(chunks))
+	if len(progressDone) == 0 || progressDone[len(progressDone)-1] != len(chunks) {
+		t.Fatalf("progress = %v, want final done %d", progressDone, len(chunks))
+	}
+}
+
 func TestFeatureRowIDStableAndPositive(t *testing.T) {
 	for _, id := range []string{"FR-001", "FR-001", "FR-999999"} {
 		r := FeatureRowID(id)

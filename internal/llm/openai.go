@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/cax/fsdtrace/internal/retry"
 )
 
 const defaultOpenAIBaseURL = "https://api.openai.com/v1"
@@ -25,6 +27,8 @@ type OpenAIClient struct {
 	apiKey  string
 	baseURL string
 	http    HTTPDoer
+	nowFn   func() time.Time
+	sleepFn func(time.Duration)
 }
 
 // OpenAIOption configures an OpenAIClient.
@@ -41,6 +45,13 @@ func WithOpenAIHTTPClient(h HTTPDoer) OpenAIOption {
 	return func(c *OpenAIClient) { c.http = h }
 }
 
+func withOpenAIClock(now func() time.Time, sleep func(time.Duration)) OpenAIOption {
+	return func(c *OpenAIClient) {
+		c.nowFn = now
+		c.sleepFn = sleep
+	}
+}
+
 // NewOpenAIClient constructs a Responses API client.
 func NewOpenAIClient(apiKey string, opts ...OpenAIOption) (*OpenAIClient, error) {
 	if strings.TrimSpace(apiKey) == "" {
@@ -50,6 +61,7 @@ func NewOpenAIClient(apiKey string, opts ...OpenAIOption) (*OpenAIClient, error)
 		apiKey:  strings.TrimSpace(apiKey),
 		baseURL: defaultOpenAIBaseURL,
 		http:    &http.Client{Timeout: 90 * time.Second},
+		nowFn:   time.Now,
 	}
 	for _, o := range opts {
 		o(c)
@@ -79,27 +91,40 @@ func (c *OpenAIClient) Generate(ctx context.Context, req GenerateRequest) (strin
 	if err != nil {
 		return "", fmt.Errorf("openai: marshal response request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(
-		ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
+	var respBody []byte
+	for attempt := 0; attempt <= retry.MaxRetries; attempt++ {
+		body, status, header, err := c.doResponsesOnce(ctx, payload)
+		switch {
+		case err != nil:
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("openai: responses: %w", ctx.Err())
+			}
+			if attempt == retry.MaxRetries {
+				return "", fmt.Errorf("openai: responses: %w", err)
+			}
+			if err := retry.Sleep(ctx, c.sleepFn, retry.Backoff(attempt)); err != nil {
+				return "", fmt.Errorf("openai: responses: %w", err)
+			}
+			continue
+		case retry.RetryableStatus(status):
+			if attempt == retry.MaxRetries {
+				return "", fmt.Errorf("openai: responses HTTP %d after %d retries: %s",
+					status, attempt, truncateString(string(body), 512))
+			}
+			delay := retry.Delay(attempt, header.Get("Retry-After"), c.nowFn)
+			if err := retry.Sleep(ctx, c.sleepFn, delay); err != nil {
+				return "", fmt.Errorf("openai: responses: %w", err)
+			}
+			continue
+		case status >= 400:
+			return "", fmt.Errorf("openai: responses HTTP %d: %s", status, truncateString(string(body), 512))
+		default:
+			respBody = body
+		}
+		break
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("openai: responses: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("openai: read response body: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("openai: responses HTTP %d: %s", resp.StatusCode, truncateString(string(respBody), 512))
+	if len(respBody) == 0 {
+		return "", errors.New("openai: empty response body")
 	}
 	var parsed openAIResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
@@ -123,6 +148,29 @@ func (c *OpenAIClient) Generate(ctx context.Context, req GenerateRequest) (strin
 		return "", errors.New("openai: empty response")
 	}
 	return text, nil
+}
+
+func (c *OpenAIClient) doResponsesOnce(ctx context.Context, payload []byte) ([]byte, int, http.Header, error) {
+	httpReq, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, c.baseURL+"/responses", bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("read response body: %w", err)
+	}
+	return respBody, resp.StatusCode, resp.Header, nil
 }
 
 type openAIResponseRequest struct {

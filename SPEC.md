@@ -124,18 +124,22 @@ All subcommands operate on a single `--db` file (default `./fsdtrace.db`).
 
 ```
 fsdtrace init                       # create DB, apply schema
-fsdtrace ingest fsd <path>          # atomize FSD into FR objects
-fsdtrace index code <repo>          # run scip-java + annotation harvest
+fsdtrace ingest fsd <path> [--resume]  # atomize FSD into FR objects
+fsdtrace index code <repo> [--resume]  # run scip-java + annotation harvest
 fsdtrace embed [--what features|artifacts|all]
-fsdtrace match [--fr FR-042] [--top-k 15] [--match-concurrency 1]
+fsdtrace match [--fr FR-042] [--top-k 15] [--match-concurrency 1] [--resume]
 fsdtrace report --format md|csv|html|json --out ./trace/
-fsdtrace trace github <url> --fsd <path> [--match-concurrency 1]  # download GitHub repo and run full pipeline
+fsdtrace trace github <url> --fsd <path> [--match-concurrency 1] [--resume]  # download GitHub repo and run full pipeline
 fsdtrace mcp serve [--transport stdio|sse]
 fsdtrace install-claude-code        # writes Claude Code MCP config entry
 fsdtrace status                     # latest run summary
 ```
 
 Global flags: `--db`, `--config`, `--log-level`, `--run-id`.
+`--resume` requires an explicit stable `--run-id`; `trace github --resume`
+also requires `--checkout-dir` so code artifact paths stay stable between
+attempts. Interactive processing commands render lightweight progress bars to
+stderr while preserving stdout summaries.
 
 The full pipeline is: `init → ingest fsd → index code → embed → match → report`.
 `trace github` is an additive convenience wrapper over that pipeline. It accepts
@@ -336,7 +340,7 @@ Three sublayers writing to the same DB transaction.
 - Providers with purpose-specific retrieval modes must embed stored corpus rows as documents and lookup text as queries. Cohere uses `search_document` for `feature_vec`/`artifact_vec` rows and `search_query` for matcher/MCP search vectors.
 - Batch up to 25 texts per request.
 - All embeddings cached in `embedding_cache` keyed by `sha256(model config + text)` so provider-specific options such as Cohere `input_type` and output dimension do not collide.
-- Exponential backoff with jitter on 429/503. Max 5 retries.
+- Exponential backoff with jitter on 429 and all HTTP 5xx responses. Max 5 retries. `Retry-After` is honored when present.
 - Per-run token budget cap (configurable). Aborts the run with a clear error if exceeded.
 
 ### 7.4 Matcher (`internal/match`)
@@ -357,6 +361,7 @@ Stages:
    - No evidence → reject the verdict and downgrade to `unrelated`.
    - If a provider reports an incomplete response, the matcher retries that batch by recursively splitting it into smaller batches.
    - `--match-concurrency N` lets the pipeline match N FRs in parallel. It defaults to `1`; DB writes still go through `internal/db.Writer`.
+   - `--resume` skips FRs that already have `matches` rows for the requested run id.
 4. **Test cross-check**: count linked tests via `tests.target_artifact`. Decorate matches with `tested: bool` and `test_count`. The matches schema has no dedicated columns; the matcher persists the decoration as a suffix on `matches.notes` in the form `"…; tested=<bool> test_count=<int>"`. Reporters and the MCP `fsd_get_feature` tool strip the suffix back out at read time.
 
 The default Bedrock judgment model is `anthropic.claude-sonnet-*-v2:0`. The default OpenAI generation model is `gpt-5.5`; OpenAI judgment uses smaller candidate batches by default to reduce response truncation. `drifts` verdicts may be re-judged in a second pass (gated by `--rejudge-drifts`), defaulting to Opus on Bedrock and GPT-5.5 on OpenAI.

@@ -71,6 +71,25 @@ Use `--match-concurrency N` to match multiple FRs in parallel; start with
 `2` or `3` for live OpenAI runs to improve throughput without creating a large
 burst of API calls.
 
+Provider HTTP calls retry `429` and all `5xx` responses up to five times with
+backoff and `Retry-After` support. Long runs can resume from a stable run id:
+pass `--run-id <id> --resume` to `ingest fsd`, `index code`, or `match`.
+For the GitHub wrapper, also pass a stable checkout path:
+
+```bash
+./bin/fsdtrace --db ./petclinic.db --run-id petclinic-v1 trace github \
+  https://github.com/spring-projects/spring-petclinic \
+  --provider openai \
+  --fsd examples/petclinic/fsd.md \
+  --checkout-dir ./work/spring-petclinic \
+  --out ./trace/petclinic \
+  --format html \
+  --resume
+```
+
+Interactive runs show progress bars on stderr; stdout remains the summary line
+for scripts.
+
 Override models with `--embedding-model`, `--atomizer-model`,
 `--judgment-model`, `--rejudge-model`, the matching `FSDTRACE_*_MODEL` env var,
 or provider-specific config such as `bedrock.embedding_model` and

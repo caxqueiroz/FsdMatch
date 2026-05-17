@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -48,6 +49,14 @@ Example:
 			if _, err := parseGitHubRepoURL(args[0]); err != nil {
 				return err
 			}
+			if o.resume {
+				if opts.runID == "" {
+					return errors.New("--resume requires --run-id")
+				}
+				if o.checkoutDir == "" {
+					return errors.New("--resume requires --checkout-dir for trace github")
+				}
+			}
 			if _, err := os.Stat(o.fsdPath); err != nil {
 				return fmt.Errorf("stat fsd %s: %w", o.fsdPath, err)
 			}
@@ -68,12 +77,24 @@ Example:
 			o.atomizerModel = cfg.model(modelAtomizer, o.atomizerModel, cmd.Flags().Changed("atomizer-model"))
 			o.judgmentModel = cfg.model(modelJudgment, o.judgmentModel, cmd.Flags().Changed("judgment-model"))
 
+			usingExisting := false
+			if o.resume && o.checkoutDir != "" {
+				if dest, err := filepath.Abs(o.checkoutDir); err == nil {
+					if empty, err := dirMissingOrEmpty(dest); err == nil {
+						usingExisting = !empty
+					}
+				}
+			}
 			repoDir, cleanup, err := prepareGitHubCheckout(ctx, args[0], o)
 			if err != nil {
 				return err
 			}
 			defer cleanup()
-			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "downloaded %s to %s\n", args[0], repoDir); err != nil {
+			checkoutMsg := "downloaded"
+			if usingExisting {
+				checkoutMsg = "using existing checkout"
+			}
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s %s to %s\n", checkoutMsg, args[0], repoDir); err != nil {
 				return err
 			}
 
@@ -89,6 +110,7 @@ Example:
 	cmd.Flags().BoolVar(&o.includeCallGraph, "include-call-graph", false, "include SCIP relationship support artifacts in the report")
 	cmd.Flags().BoolVar(&o.runScipJava, "run-scip-java", false, "shell out to scip-java in the downloaded repo before indexing")
 	cmd.Flags().StringVar(&o.scipJavaBin, "scip-java-bin", "scip-java", "scip-java executable name")
+	cmd.Flags().BoolVar(&o.resume, "resume", false, "resume a trace run by skipping completed FSD, code, and match work for --run-id")
 	cmd.Flags().IntVar(&o.topK, "top-k", match.DefaultTopK, "vec0 KNN candidates to consider per FR")
 	cmd.Flags().IntVar(&o.matchConcurrency, "match-concurrency", 1, "FRs to match in parallel")
 	cmd.Flags().StringVar(&o.provider, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
@@ -111,6 +133,7 @@ type traceGithubOptions struct {
 	includeCallGraph bool
 	runScipJava      bool
 	scipJavaBin      string
+	resume           bool
 	topK             int
 	matchConcurrency int
 	provider         string
@@ -126,6 +149,15 @@ func prepareGitHubCheckout(ctx context.Context, rawURL string, o traceGithubOpti
 	dest, cleanup, err := checkoutDestination(o)
 	if err != nil {
 		return "", cleanup, err
+	}
+	if o.resume && o.checkoutDir != "" {
+		empty, err := dirMissingOrEmpty(dest)
+		if err != nil {
+			return "", cleanup, err
+		}
+		if !empty {
+			return dest, cleanup, nil
+		}
 	}
 	if err := downloadGitHubRepo(ctx, rawURL, o.ref, dest); err != nil {
 		cleanup()
@@ -155,6 +187,9 @@ func checkoutDestination(o traceGithubOptions) (string, func(), error) {
 		return "", cleanup, err
 	}
 	if !empty {
+		if o.resume {
+			return dest, cleanup, nil
+		}
 		return "", cleanup, fmt.Errorf("checkout dir %s already exists and is not empty", dest)
 	}
 	return dest, cleanup, nil
@@ -192,20 +227,20 @@ func runTracePipeline(
 	if runBase == "" {
 		runBase = fmt.Sprintf("trace-%d", time.Now().Unix())
 	}
-	if err := traceIngestFSD(ctx, d, cfg, o, runBase+"-fsd"); err != nil {
+	if err := traceIngestFSD(ctx, cmd.ErrOrStderr(), d, cfg, o, runBase+"-fsd"); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "ingested FSD (run %s)\n", runBase+"-fsd"); err != nil {
 		return err
 	}
-	if err := traceIndexCode(ctx, d, cfg, repoDir, o, runBase+"-index"); err != nil {
+	if err := traceIndexCode(ctx, cmd.ErrOrStderr(), d, cfg, repoDir, o, runBase+"-index"); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "indexed code (run %s)\n", runBase+"-index"); err != nil {
 		return err
 	}
 	matchRunID := runBase + "-match"
-	if err := traceMatch(ctx, d, cfg, o, matchRunID); err != nil {
+	if err := traceMatch(ctx, cmd.ErrOrStderr(), d, cfg, o, matchRunID); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "matched features (run %s)\n", matchRunID); err != nil {
@@ -214,7 +249,7 @@ func runTracePipeline(
 	return traceReport(ctx, cmd, d, o, matchRunID)
 }
 
-func traceIngestFSD(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubOptions, runID string) error {
+func traceIngestFSD(ctx context.Context, errOut io.Writer, d *db.DB, cfg appConfig, o traceGithubOptions, runID string) error {
 	chunks, err := fsd.ParseFile(o.fsdPath, fsd.DefaultAnchorPattern)
 	if err != nil {
 		return err
@@ -230,15 +265,20 @@ func traceIngestFSD(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubO
 	if err != nil {
 		return err
 	}
+	progress := newProgress(errOut, "ingest fsd")
+	defer progress.Finish()
 	atomizer := fsd.NewAtomizer(d, generator, emb,
 		fsd.WithModel(o.atomizerModel),
-		fsd.WithLogger(slog.Default()))
+		fsd.WithLogger(slog.Default()),
+		fsd.WithResume(o.resume),
+		fsd.WithProgress(progress.Advance))
 	_, err = atomizer.Ingest(ctx, chunks, runID)
 	return err
 }
 
 func traceIndexCode(
 	ctx context.Context,
+	errOut io.Writer,
 	d *db.DB,
 	cfg appConfig,
 	repoDir string,
@@ -249,7 +289,11 @@ func traceIndexCode(
 	if err != nil {
 		return err
 	}
-	indexer := code.NewIndexer(d, emb)
+	progress := newProgress(errOut, "index code")
+	defer progress.Finish()
+	indexer := code.NewIndexer(d, emb,
+		code.WithResume(o.resume),
+		code.WithProgress(progress.Advance))
 
 	scipPath := ""
 	if o.runScipJava {
@@ -265,7 +309,7 @@ func traceIndexCode(
 	return err
 }
 
-func traceMatch(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubOptions, runID string) error {
+func traceMatch(ctx context.Context, errOut io.Writer, d *db.DB, cfg appConfig, o traceGithubOptions, runID string) error {
 	generator, err := newGenerator(o.provider, o.matchCassette, cfg)
 	if err != nil {
 		return err
@@ -278,6 +322,7 @@ func traceMatch(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubOptio
 		match.WithTopK(o.topK),
 		match.WithMatchConcurrency(o.matchConcurrency),
 		match.WithJudgmentModel(o.judgmentModel),
+		match.WithResume(o.resume),
 	}
 	if o.provider == ProviderOpenAI {
 		pipeOpts = append(pipeOpts,
@@ -285,6 +330,9 @@ func traceMatch(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubOptio
 			match.WithJudgmentBatchSize(openAIJudgmentBatchSize),
 		)
 	}
+	progress := newProgress(errOut, "match")
+	defer progress.Finish()
+	pipeOpts = append(pipeOpts, match.WithProgress(progress.Advance))
 	pipe := match.NewPipeline(d, generator, emb, pipeOpts...)
 	_, err = pipe.MatchAll(ctx, runID, nil)
 	return err

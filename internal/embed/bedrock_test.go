@@ -78,6 +78,42 @@ func TestBedrockClientRetriesOn503(t *testing.T) {
 	}
 }
 
+func TestBedrockClientRetriesOn500WithRetryAfter(t *testing.T) {
+	var calls atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"temporary"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(ts.Close)
+
+	var slept []time.Duration
+	c, err := NewClient(ts.URL, withClock(time.Now, func(d time.Duration) {
+		slept = append(slept, d)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := c.Invoke(context.Background(), "foo:0", map[string]any{}, &out); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("expected 2 calls, got %d", calls.Load())
+	}
+	if len(slept) != 1 || slept[0] != 2*time.Second {
+		t.Errorf("sleep = %v, want [2s]", slept)
+	}
+}
+
 func TestBedrockClient4xxIsNotRetried(t *testing.T) {
 	var calls atomic.Int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

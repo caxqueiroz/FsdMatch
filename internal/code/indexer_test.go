@@ -2,6 +2,7 @@ package code
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,23 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 }
 
 func (f *fakeEmbedder) Model() string { return "fake-embedder" }
+
+type failingEmbedder struct {
+	calls     atomic.Int64
+	failAfter int64
+}
+
+func (f *failingEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	call := f.calls.Add(1)
+	if f.failAfter > 0 && call > f.failAfter {
+		return nil, errors.New("embed failed")
+	}
+	v := make([]float32, db.EmbeddingDim)
+	v[0] = float32(len(text))
+	return v, nil
+}
+
+func (f *failingEmbedder) Model() string { return "failing-embedder" }
 
 func TestIndexerOnFixturePopulatesAllRequiredTables(t *testing.T) {
 	ctx := context.Background()
@@ -106,6 +124,72 @@ func TestIndexerOnFixturePopulatesAllRequiredTables(t *testing.T) {
 	}
 	if artifacts2 != artifacts {
 		t.Errorf("re-run left %d artifacts (was %d) — purge isn't idempotent", artifacts2, artifacts)
+	}
+}
+
+func TestIndexerResumeSkipsExistingVectorsAndReusesArtifacts(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(dir, "ix.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	if err := d.ApplySchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	repoRoot, err := filepath.Abs("../../testdata/sample-spring-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken := &failingEmbedder{failAfter: 1}
+	if _, err := NewIndexer(d, broken).Index(ctx, repoRoot, "", "resume-index"); err == nil {
+		t.Fatal("first index unexpectedly succeeded")
+	}
+	var artifactsBefore, vectorsBefore int
+	if err := d.SQL().QueryRowContext(ctx, "SELECT COUNT(*) FROM code_artifacts").Scan(&artifactsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SQL().QueryRowContext(ctx, "SELECT COUNT(*) FROM artifact_vec_rowids").Scan(&vectorsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if artifactsBefore == 0 || vectorsBefore != 1 {
+		t.Fatalf("partial run artifacts=%d vectors=%d, want artifacts>0 and vectors=1", artifactsBefore, vectorsBefore)
+	}
+
+	embedder := &fakeEmbedder{}
+	progress := make([]int, 0, artifactsBefore)
+	res, err := NewIndexer(d, embedder,
+		WithResume(true),
+		WithProgress(func(done, total int) {
+			if total != artifactsBefore {
+				t.Errorf("progress total = %d, want %d", total, artifactsBefore)
+			}
+			progress = append(progress, done)
+		}),
+	).Index(ctx, repoRoot, "", "resume-index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ArtifactCount != artifactsBefore {
+		t.Fatalf("artifact count = %d, want %d", res.ArtifactCount, artifactsBefore)
+	}
+	if got := embedder.calls.Load(); got != int64(artifactsBefore-vectorsBefore) {
+		t.Fatalf("resume embed calls = %d, want %d", got, artifactsBefore-vectorsBefore)
+	}
+	var artifactsAfter, vectorsAfter int
+	if err := d.SQL().QueryRowContext(ctx, "SELECT COUNT(*) FROM code_artifacts").Scan(&artifactsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SQL().QueryRowContext(ctx, "SELECT COUNT(*) FROM artifact_vec_rowids").Scan(&vectorsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if artifactsAfter != artifactsBefore || vectorsAfter != artifactsBefore {
+		t.Fatalf("after resume artifacts=%d vectors=%d, want both %d", artifactsAfter, vectorsAfter, artifactsBefore)
+	}
+	if len(progress) != artifactsBefore || progress[len(progress)-1] != artifactsBefore {
+		t.Fatalf("progress callbacks = %v, want final %d", progress, artifactsBefore)
 	}
 }
 

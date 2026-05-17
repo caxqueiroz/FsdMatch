@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cax/fsdtrace/internal/db"
+	"github.com/cax/fsdtrace/internal/retry"
 )
 
 const (
@@ -30,6 +31,8 @@ type OpenAIEmbedder struct {
 	cacheModel string
 	baseURL    string
 	http       HTTPDoer
+	nowFn      func() time.Time
+	sleepFn    func(time.Duration)
 }
 
 // OpenAIEmbedderOption configures an OpenAIEmbedder.
@@ -43,6 +46,13 @@ func WithOpenAIEmbedderBaseURL(baseURL string) OpenAIEmbedderOption {
 // WithOpenAIEmbedderHTTPClient overrides the default HTTP client.
 func WithOpenAIEmbedderHTTPClient(h HTTPDoer) OpenAIEmbedderOption {
 	return func(e *OpenAIEmbedder) { e.http = h }
+}
+
+func withOpenAIEmbedderClock(now func() time.Time, sleep func(time.Duration)) OpenAIEmbedderOption {
+	return func(e *OpenAIEmbedder) {
+		e.nowFn = now
+		e.sleepFn = sleep
+	}
 }
 
 // NewOpenAIEmbedder constructs an OpenAI embedding adapter.
@@ -60,6 +70,7 @@ func NewOpenAIEmbedder(apiKey, model string, _ Purpose, opts ...OpenAIEmbedderOp
 		cacheModel: fmt.Sprintf("openai:%s#dim=%d", model, db.EmbeddingDim),
 		baseURL:    defaultOpenAIBaseURL,
 		http:       &http.Client{Timeout: 90 * time.Second},
+		nowFn:      time.Now,
 	}
 	for _, o := range opts {
 		o(e)
@@ -85,26 +96,40 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	if err != nil {
 		return nil, fmt.Errorf("openai embedding: marshal: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/embeddings", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	var respBody []byte
+	for attempt := 0; attempt <= retry.MaxRetries; attempt++ {
+		body, status, header, err := e.doEmbeddingOnce(ctx, payload)
+		switch {
+		case err != nil:
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("openai embedding: request: %w", ctx.Err())
+			}
+			if attempt == retry.MaxRetries {
+				return nil, fmt.Errorf("openai embedding: request: %w", err)
+			}
+			if err := retry.Sleep(ctx, e.sleepFn, retry.Backoff(attempt)); err != nil {
+				return nil, fmt.Errorf("openai embedding: request: %w", err)
+			}
+			continue
+		case retry.RetryableStatus(status):
+			if attempt == retry.MaxRetries {
+				return nil, fmt.Errorf("openai embedding: HTTP %d after %d retries: %s",
+					status, attempt, truncate(body, 512))
+			}
+			delay := retry.Delay(attempt, header.Get("Retry-After"), e.nowFn)
+			if err := retry.Sleep(ctx, e.sleepFn, delay); err != nil {
+				return nil, fmt.Errorf("openai embedding: request: %w", err)
+			}
+			continue
+		case status >= 400:
+			return nil, fmt.Errorf("openai embedding: HTTP %d: %s", status, truncate(body, 512))
+		default:
+			respBody = body
+		}
+		break
 	}
-	req.Header.Set("Authorization", "Bearer "+e.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := e.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("openai embedding: request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("openai embedding: read body: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("openai embedding: HTTP %d: %s", resp.StatusCode, truncate(respBody, 512))
+	if len(respBody) == 0 {
+		return nil, errors.New("openai embedding: empty response body")
 	}
 	var parsed openAIEmbeddingResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
@@ -119,6 +144,28 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 // Model returns the cache key model string, including provider and
 // dimension so OpenAI vectors never collide with Bedrock vectors.
 func (e *OpenAIEmbedder) Model() string { return e.cacheModel }
+
+func (e *OpenAIEmbedder) doEmbeddingOnce(ctx context.Context, payload []byte) ([]byte, int, http.Header, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/embeddings", bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+e.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := e.http.Do(req)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, resp.Header, fmt.Errorf("read body: %w", err)
+	}
+	return respBody, resp.StatusCode, resp.Header, nil
+}
 
 type openAIEmbeddingRequest struct {
 	Model          string `json:"model"`

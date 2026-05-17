@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -28,6 +29,7 @@ func newIngestFsdCmd() *cobra.Command {
 		embeddingModel string
 		cassettePath   string
 		providerFlag   string
+		resume         bool
 	)
 	c := &cobra.Command{
 		Use:   "fsd <path>",
@@ -44,6 +46,9 @@ responses file, used by tests and offline smoke runs.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalCtx()
 			defer cancel()
+			if resume && opts.runID == "" {
+				return errors.New("--resume requires --run-id")
+			}
 
 			cfg, err := loadAppConfig(opts.cfgPath, nil)
 			if err != nil {
@@ -83,9 +88,13 @@ responses file, used by tests and offline smoke runs.`,
 			if err != nil {
 				return err
 			}
+			progress := newProgress(cmd.ErrOrStderr(), "ingest fsd")
+			defer progress.Finish()
 			atomizer := fsd.NewAtomizer(d, generator, emb,
 				fsd.WithModel(atomizerModel),
-				fsd.WithLogger(slog.Default()))
+				fsd.WithLogger(slog.Default()),
+				fsd.WithResume(resume),
+				fsd.WithProgress(progress.Advance))
 
 			runID := opts.runID
 			if runID == "" {
@@ -105,5 +114,6 @@ responses file, used by tests and offline smoke runs.`,
 	c.Flags().StringVar(&atomizerModel, "atomizer-model", "", "model id for atomization (flag > env > config > provider default)")
 	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
+	c.Flags().BoolVar(&resume, "resume", false, "skip FSD chunks already completed for --run-id")
 	return c
 }

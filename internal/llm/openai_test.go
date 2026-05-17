@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestOpenAIClientGenerateUsesResponsesAPI(t *testing.T) {
@@ -106,5 +108,45 @@ func TestOpenAIClientGenerateRejectsIncompletePartialText(t *testing.T) {
 	}
 	if !IsIncomplete(err) {
 		t.Fatalf("expected incomplete error, got %T", err)
+	}
+}
+
+func TestOpenAIClientGenerateRetries429And5xx(t *testing.T) {
+	var calls atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"code":"rate_limit","message":"slow down"}}`))
+		case 2:
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"code":"bad_gateway","message":"temporary"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"status":"completed","output_text":"ok"}`))
+		}
+	}))
+	t.Cleanup(ts.Close)
+
+	var slept []time.Duration
+	c, err := NewOpenAIClient("test-key",
+		WithOpenAIBaseURL(ts.URL),
+		WithOpenAIHTTPClient(ts.Client()),
+		withOpenAIClock(time.Now, func(d time.Duration) { slept = append(slept, d) }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Generate(context.Background(), GenerateRequest{Model: "gpt-test", User: "prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ok" {
+		t.Fatalf("Generate() = %q", got)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("calls = %d, want 3", calls.Load())
+	}
+	if len(slept) != 2 || slept[0] != time.Second {
+		t.Fatalf("sleep = %v, want first delay 1s", slept)
 	}
 }
