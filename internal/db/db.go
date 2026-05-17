@@ -22,7 +22,7 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-// EmbeddingDim is the fixed vec0 dimension. Matches Titan v2.
+// EmbeddingDim is the fixed vec0 dimension for stored vectors.
 const EmbeddingDim = 1024
 
 // DB wraps *sql.DB and an attached writer goroutine.

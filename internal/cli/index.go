@@ -35,7 +35,7 @@ func newIndexCodeCmd() *cobra.Command {
 		Use:   "code <repo>",
 		Short: "Index a Spring Boot repo: harvest annotations, optionally merge SCIP",
 		Long: `Walks <repo> for .java files, harvests Spring annotations and JUnit tests
-into code_artifacts and tests, and embeds each artifact via Titan v2.
+into code_artifacts and tests, and embeds each artifact via Bedrock.
 
 If --scip-index points at an existing index.scip the SCIP layer fills
 scip_symbol and inserts call-graph relationships. If --run-scip-java is
@@ -79,7 +79,7 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 			if err != nil {
 				return err
 			}
-			emb := embed.NewTitanEmbedder(bedrock, embeddingModel)
+			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeDocument)
 			indexer := code.NewIndexer(d, emb)
 
 			scipPath := scipIndexPath
@@ -111,7 +111,7 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 	c.Flags().StringVar(&scipIndexPath, "scip-index", "", "path to a pre-existing index.scip (skips scip-java)")
 	c.Flags().BoolVar(&runScipJava, "run-scip-java", false, "shell out to scip-java in the repo first")
 	c.Flags().StringVar(&scipJavaBin, "scip-java-bin", "scip-java", "scip-java executable name")
-	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
+	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return c
 }

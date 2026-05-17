@@ -36,7 +36,7 @@ type Config struct {
 	DBPath string
 	// BedrockBaseURL overrides the env value when non-empty.
 	BedrockBaseURL string
-	// EmbeddingModel overrides the default Titan model when non-empty.
+	// EmbeddingModel overrides the default embedding model when non-empty.
 	EmbeddingModel string
 	// JudgmentModel overrides the default Claude model when non-empty.
 	JudgmentModel string
@@ -173,7 +173,7 @@ func (s *Server) Bedrock(_ context.Context) (*embed.BedrockClient, embed.Embedde
 			return
 		}
 		s.openBedrock = c
-		s.openEmbedder = embed.NewTitanEmbedder(c, s.cfg.EmbeddingModel)
+		s.openEmbedder = embed.NewBedrockEmbedder(c, s.cfg.EmbeddingModel, embed.PurposeQuery)
 	})
 	return s.openBedrock, s.openEmbedder, s.openBedrockErr
 }

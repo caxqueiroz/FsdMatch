@@ -34,6 +34,11 @@ Live atomization, embedding, and judgment calls require:
 export BEDROCK_BASE_URL="https://your-krakend-bedrock-route"
 ```
 
+Titan v2 is the default embedding model. Override it with
+`--embedding-model`, `FSDTRACE_EMBEDDING_MODEL`, or `bedrock.embedding_model`
+in `fsdtrace.yaml`. Cohere Embed v3/v4 models are supported through the same
+Bedrock route; stored vectors remain 1024-dimensional.
+
 ## Taskfile Workflow
 
 The repository includes a Go Task `Taskfile.yml`.

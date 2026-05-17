@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	// EnvEmbeddingModel overrides the Titan embedding model.
+	// EnvEmbeddingModel overrides the embedding model.
 	EnvEmbeddingModel = "FSDTRACE_EMBEDDING_MODEL"
 	// EnvAtomizerModel overrides the Claude model used for FSD atomization.
 	EnvAtomizerModel = "FSDTRACE_ATOMIZER_MODEL"

@@ -33,7 +33,7 @@ type Feature struct {
 	FSDAnchor  string `json:"-"`
 }
 
-// EmbeddingText is the canonical text fed to Titan for this feature.
+// EmbeddingText is the canonical text fed to the embedding model for this feature.
 // SPEC §7.1: title + description + acceptance criteria.
 func (f Feature) EmbeddingText() string {
 	var b strings.Builder

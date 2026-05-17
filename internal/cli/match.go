@@ -55,7 +55,7 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 			if err != nil {
 				return err
 			}
-			emb := embed.NewTitanEmbedder(bedrock, embeddingModel)
+			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeQuery)
 			pipe := match.NewPipeline(d, bedrock, emb,
 				match.WithTopK(topK),
 				match.WithJudgmentModel(judgmentModel),
@@ -97,7 +97,7 @@ coverage from the tests table. Re-runs are idempotent within a run id.`,
 	cmd.Flags().StringVar(&feature, "fr", "", "match a single feature ID, e.g. FR-042")
 	cmd.Flags().IntVar(&topK, "top-k", match.DefaultTopK, "vec0 KNN candidates to consider per FR")
 	cmd.Flags().StringVar(&judgmentModel, "judgment-model", "", "Bedrock Claude model id for judgment (flag > env > config > default)")
-	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
+	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
 	cmd.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	cmd.Flags().BoolVar(&rejudgeDrifts, "rejudge-drifts", false, "after the first pass, re-judge every drifts verdict with --rejudge-model (SPEC §7.4)")
 	cmd.Flags().StringVar(&rejudgeModel, "rejudge-model", "", "stronger Bedrock Claude model used for the --rejudge-drifts second pass (flag > env > config > default)")
