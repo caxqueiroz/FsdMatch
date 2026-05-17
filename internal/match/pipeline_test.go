@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,9 +13,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cax/fsdtrace/internal/db"
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
 type fakeEmbedder struct{ calls atomic.Int64 }
@@ -26,6 +29,74 @@ func (f *fakeEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 	return v, nil
 }
 func (f *fakeEmbedder) Model() string { return "fake-embed" }
+
+type batchGenerator struct {
+	calls     [][]int64
+	failAbove int
+}
+
+func (g *batchGenerator) Generate(_ context.Context, req llm.GenerateRequest) (string, error) {
+	ids := extractCandidateIDs(req.User)
+	g.calls = append(g.calls, ids)
+	if g.failAbove > 0 && len(ids) > g.failAbove {
+		return "", &llm.IncompleteError{Provider: "test", Reason: "max_output_tokens"}
+	}
+	entries := make([]judgmentEntry, 0, len(ids))
+	for _, id := range ids {
+		if id%2 == 0 {
+			continue // omitted candidates are treated as unrelated.
+		}
+		entries = append(entries, judgmentEntry{
+			ArtifactID: id,
+			Verdict:    VerdictImplements,
+			Confidence: 0.9,
+			Evidence:   []Evidence{{File: "Candidate.java", Start: 1, End: 2}},
+		})
+	}
+	out, _ := json.Marshal(entries)
+	return string(out), nil
+}
+
+type concurrentGenerator struct {
+	active   atomic.Int64
+	max      atomic.Int64
+	calls    atomic.Int64
+	delay    time.Duration
+	response string
+}
+
+func (g *concurrentGenerator) Generate(ctx context.Context, _ llm.GenerateRequest) (string, error) {
+	current := g.active.Add(1)
+	defer g.active.Add(-1)
+	g.calls.Add(1)
+	for {
+		maxActive := g.max.Load()
+		if current <= maxActive || g.max.CompareAndSwap(maxActive, current) {
+			break
+		}
+	}
+	timer := time.NewTimer(g.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	if g.response != "" {
+		return g.response, nil
+	}
+	return "[]", nil
+}
+
+func extractCandidateIDs(prompt string) []int64 {
+	re := regexp.MustCompile(`\[(\d+)\] kind=`)
+	matches := re.FindAllStringSubmatch(prompt, -1)
+	ids := make([]int64, 0, len(matches))
+	for _, m := range matches {
+		ids = append(ids, atoi64(m[1]))
+	}
+	return ids
+}
 
 func setupPipelineDB(t *testing.T) *db.DB {
 	t.Helper()
@@ -170,6 +241,107 @@ func fakeJudgmentServer(t *testing.T, calls *atomic.Int64) *httptest.Server {
 	}))
 }
 
+func TestPipelineJudgeCandidatesBatchesAndTreatsOmissionsAsUnrelated(t *testing.T) {
+	gen := &batchGenerator{}
+	pipe := NewPipeline(nil, gen, &fakeEmbedder{},
+		WithJudgmentModel("test-model"),
+		WithJudgmentBatchSize(2),
+	)
+	candidates := []ArtifactCandidate{
+		{ID: 1, Kind: "rest_endpoint", Identifier: "GET /a", File: "A.java", StartLine: 1, EndLine: 2},
+		{ID: 2, Kind: "rest_endpoint", Identifier: "GET /b", File: "B.java", StartLine: 1, EndLine: 2},
+		{ID: 3, Kind: "rest_endpoint", Identifier: "GET /c", File: "C.java", StartLine: 1, EndLine: 2},
+		{ID: 4, Kind: "rest_endpoint", Identifier: "GET /d", File: "D.java", StartLine: 1, EndLine: 2},
+		{ID: 5, Kind: "rest_endpoint", Identifier: "GET /e", File: "E.java", StartLine: 1, EndLine: 2},
+	}
+
+	matches, err := pipe.judgeCandidates(context.Background(), FRSnapshot{ID: "FR-1"}, nil, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(gen.calls), 3; got != want {
+		t.Fatalf("judge calls = %d, want %d", got, want)
+	}
+	if got := len(gen.calls[0]); got != 2 {
+		t.Fatalf("first batch size = %d, want 2", got)
+	}
+	if len(matches) != len(candidates) {
+		t.Fatalf("matches = %d, want %d", len(matches), len(candidates))
+	}
+	for _, m := range matches {
+		want := VerdictImplements
+		if m.ArtifactID%2 == 0 {
+			want = VerdictUnrelated
+		}
+		if m.Verdict != want {
+			t.Fatalf("artifact %d verdict = %q, want %q", m.ArtifactID, m.Verdict, want)
+		}
+	}
+}
+
+func TestPipelineJudgeCandidatesRetriesIncompleteWithSmallerBatches(t *testing.T) {
+	gen := &batchGenerator{failAbove: 2}
+	pipe := NewPipeline(nil, gen, &fakeEmbedder{},
+		WithJudgmentModel("test-model"),
+		WithJudgmentBatchSize(4),
+	)
+	candidates := []ArtifactCandidate{
+		{ID: 1, Kind: "rest_endpoint", Identifier: "GET /a", File: "A.java", StartLine: 1, EndLine: 2},
+		{ID: 2, Kind: "rest_endpoint", Identifier: "GET /b", File: "B.java", StartLine: 1, EndLine: 2},
+		{ID: 3, Kind: "rest_endpoint", Identifier: "GET /c", File: "C.java", StartLine: 1, EndLine: 2},
+		{ID: 4, Kind: "rest_endpoint", Identifier: "GET /d", File: "D.java", StartLine: 1, EndLine: 2},
+	}
+
+	matches, err := pipe.judgeCandidates(context.Background(), FRSnapshot{ID: "FR-1"}, nil, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSizes := make([]int, 0, len(gen.calls))
+	for _, call := range gen.calls {
+		gotSizes = append(gotSizes, len(call))
+	}
+	wantSizes := []int{4, 2, 2}
+	if !intSlicesEqual(gotSizes, wantSizes) {
+		t.Fatalf("batch sizes = %v, want %v", gotSizes, wantSizes)
+	}
+	if len(matches) != len(candidates) {
+		t.Fatalf("matches = %d, want %d", len(matches), len(candidates))
+	}
+}
+
+func TestPipelineMatchAllHonorsConcurrency(t *testing.T) {
+	ctx := context.Background()
+	d := setupPipelineDB(t)
+	for i := 1; i <= 4; i++ {
+		id := fmt.Sprintf("FR-%03d", i)
+		seedFeature(t, d, id, "List owners", "User can list owners", []string{"GET /owners"})
+	}
+	_ = seedArtifact(t, d, "rest_endpoint", "GET /owners", "OwnerController.java", 10, 20)
+
+	gen := &concurrentGenerator{delay: 50 * time.Millisecond}
+	pipe := NewPipeline(d, gen, &fakeEmbedder{},
+		WithTopK(1),
+		WithMatchConcurrency(2),
+	)
+
+	summary, err := pipe.MatchAll(ctx, "match-concurrent", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gen.calls.Load(); got != 4 {
+		t.Fatalf("judge calls = %d, want 4", got)
+	}
+	if got := gen.max.Load(); got < 2 {
+		t.Fatalf("max concurrent judge calls = %d, want at least 2", got)
+	}
+	if got := gen.max.Load(); got > 2 {
+		t.Fatalf("max concurrent judge calls = %d, want no more than 2", got)
+	}
+	if got, want := summary.TotalMatches, 4; got != want {
+		t.Fatalf("total matches = %d, want %d", got, want)
+	}
+}
+
 func TestPipelineMatchAll_PopulatesMatchesWithEvidenceAndTestDecoration(t *testing.T) {
 	ctx := context.Background()
 	d := setupPipelineDB(t)
@@ -192,7 +364,7 @@ func TestPipelineMatchAll_PopulatesMatchesWithEvidenceAndTestDecoration(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	pipe := NewPipeline(d, bedrock, &fakeEmbedder{}, WithTopK(10))
+	pipe := NewPipeline(d, llm.NewBedrockGenerator(bedrock), &fakeEmbedder{}, WithTopK(10))
 
 	summary, err := pipe.MatchAll(ctx, "match-test", nil)
 	if err != nil {
@@ -329,7 +501,7 @@ func TestRejudgeDrifts_PromotesAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pipe := NewPipeline(d, bedrock, &fakeEmbedder{})
+	pipe := NewPipeline(d, llm.NewBedrockGenerator(bedrock), &fakeEmbedder{})
 
 	rj, err := pipe.RejudgeDrifts(ctx, "rj-run", "anthropic.claude-opus-4-v2:0")
 	if err != nil {
@@ -375,6 +547,18 @@ func atoi64(s string) int64 {
 }
 
 func atoi(s string) int { return int(atoi64(s)) }
+
+func intSlicesEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func fnv64(s string) int64 {
 	const offset = 1469598103934665603

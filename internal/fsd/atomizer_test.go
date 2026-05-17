@@ -15,6 +15,7 @@ import (
 
 	"github.com/cax/fsdtrace/internal/db"
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
 // fakeBedrock is an httptest server that returns deterministic responses
@@ -27,10 +28,10 @@ type fakeBedrock struct {
 
 func (f *fakeBedrock) handler(t *testing.T) http.Handler {
 	t.Helper()
-	// Match the per-chunk anchor that BuildAtomizerUserMessage embeds
-	// as "Anchor: FR-NNN". The system prompt also contains "FR-042" as
-	// an example so a naive `FR-\d+` match would collapse everything.
-	anchorRe := regexp.MustCompile(`Anchor:\s*([A-Z]+-\d+)`)
+	// Match the per-chunk anchor that BuildAtomizerUserMessage embeds.
+	// The system prompt also contains "FR-042" as an example so a naive
+	// unscoped search would collapse everything.
+	anchorRe := regexp.MustCompile(`Anchor:\s*(\bFR(?:-[A-Z0-9]+)*-\d+\b)`)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		switch {
@@ -93,7 +94,7 @@ func setupAtomizer(t *testing.T, fb *fakeBedrock) (*Atomizer, *db.DB, *httptest.
 		t.Fatal(err)
 	}
 	emb := embed.NewTitanEmbedder(bedrock, embed.TitanModelID)
-	a := NewAtomizer(d, bedrock, emb)
+	a := NewAtomizer(d, llm.NewBedrockGenerator(bedrock), emb)
 	return a, d, ts
 }
 

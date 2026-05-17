@@ -12,9 +12,13 @@ import (
 
 	"github.com/cax/fsdtrace/internal/db"
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 	"github.com/cax/fsdtrace/internal/match"
 	"github.com/cax/fsdtrace/internal/report"
 )
+
+const openAIJudgmentMaxTokens = 12000
+const openAIJudgmentBatchSize = 8
 
 // ----- search_features ---------------------------------------------------
 
@@ -40,7 +44,7 @@ func (s *Server) handleSearchFeatures(ctx context.Context, req mcpgo.CallToolReq
 	if err != nil {
 		return resultErr(err), nil
 	}
-	_, emb, err := s.Bedrock(ctx)
+	_, emb, err := s.Models(ctx)
 	if err != nil {
 		return resultErr(err), nil
 	}
@@ -214,7 +218,7 @@ func (s *Server) handleSearchCode(ctx context.Context, req mcpgo.CallToolRequest
 	if err != nil {
 		return resultErr(err), nil
 	}
-	_, emb, err := s.Bedrock(ctx)
+	_, emb, err := s.Models(ctx)
 	if err != nil {
 		return resultErr(err), nil
 	}
@@ -563,18 +567,29 @@ func (s *Server) handleRematchFeature(ctx context.Context, req mcpgo.CallToolReq
 	if err != nil {
 		return resultErr(err), nil
 	}
-	bc, emb, err := s.Bedrock(ctx)
+	generator, emb, err := s.Models(ctx)
 	if err != nil {
 		return resultErr(err), nil
 	}
 	jModel := s.cfg.JudgmentModel
 	if jModel == "" {
-		jModel = match.DefaultJudgmentModel
+		if providerName(s.cfg.Provider) == ProviderOpenAI {
+			jModel = llm.DefaultOpenAIModel
+		} else {
+			jModel = match.DefaultJudgmentModel
+		}
 	}
-	pipe := match.NewPipeline(d, bc, emb,
+	pipeOpts := []match.PipelineOption{
 		match.WithTopK(topK),
 		match.WithJudgmentModel(jModel),
-	)
+	}
+	if providerName(s.cfg.Provider) == ProviderOpenAI {
+		pipeOpts = append(pipeOpts,
+			match.WithJudgmentMaxTokens(openAIJudgmentMaxTokens),
+			match.WithJudgmentBatchSize(openAIJudgmentBatchSize),
+		)
+	}
+	pipe := match.NewPipeline(d, generator, emb, pipeOpts...)
 	summary, err := pipe.MatchAll(ctx, runID, []string{id})
 	if err != nil {
 		return resultErr(err), nil

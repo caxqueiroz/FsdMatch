@@ -21,6 +21,7 @@ func newMCPCmd() *cobra.Command {
 		transport      string
 		addr           string
 		bedrockBaseURL string
+		providerFlag   string
 		embeddingModel string
 		judgmentModel  string
 	)
@@ -28,7 +29,7 @@ func newMCPCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Start the MCP server (stdio or sse)",
 		Long: `Runs the SPEC §7.6 tool catalog over the chosen transport. The DB and
-Bedrock client open lazily on first request so cold start stays under
+model provider clients open lazily on first request so cold start stays under
 ~200ms (SPEC §10).
 
 Transports:
@@ -45,6 +46,11 @@ Transports:
 			if err != nil {
 				return err
 			}
+			var provider string
+			cfg, provider, err = resolveProvider(cfg, providerFlag, cmd.Flags().Changed("provider"))
+			if err != nil {
+				return err
+			}
 			baseURL := cfg.bedrockURL()
 			if cmd.Flags().Changed("bedrock-base-url") && bedrockBaseURL != "" {
 				baseURL = bedrockBaseURL
@@ -54,7 +60,9 @@ Transports:
 
 			srv, state := mcp.NewServer(mcp.Config{
 				DBPath:         opts.dbPath,
+				Provider:       provider,
 				BedrockBaseURL: baseURL,
+				OpenAIBaseURL:  cfg.openAIURL(),
 				EmbeddingModel: embeddingModel,
 				JudgmentModel:  judgmentModel,
 			})
@@ -71,9 +79,10 @@ Transports:
 	}
 	serve.Flags().StringVar(&transport, "transport", "stdio", "transport: stdio|sse")
 	serve.Flags().StringVar(&addr, "addr", "127.0.0.1:8765", "address to bind for sse transport")
+	serve.Flags().StringVar(&providerFlag, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
 	serve.Flags().StringVar(&bedrockBaseURL, "bedrock-base-url", "", "Bedrock route (flag > env > config)")
-	serve.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
-	serve.Flags().StringVar(&judgmentModel, "judgment-model", "", "Bedrock Claude model id for fsd_rematch_feature (flag > env > config > default)")
+	serve.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
+	serve.Flags().StringVar(&judgmentModel, "judgment-model", "", "model id for fsd_rematch_feature (flag > env > config > provider default)")
 	cmd.AddCommand(serve)
 	return cmd
 }

@@ -7,24 +7,20 @@ import (
 
 // PromptVersion is the version stamp written into matches.prompt_version.
 // HARD CONSTRAINT (CLAUDE.md): bump whenever the prompt template changes.
-const PromptVersion = "match-v1"
+const PromptVersion = "match-v2"
 
-// DefaultJudgmentModel matches SPEC §7.4.
+// DefaultJudgmentModel is used when provider=bedrock.
 const DefaultJudgmentModel = "anthropic.claude-sonnet-4-v2:0"
-
-// BedrockAnthropicVersion is the required `anthropic_version` for the
-// Bedrock-hosted Claude Messages API.
-const BedrockAnthropicVersion = "bedrock-2023-05-31"
 
 // JudgmentSystem is the system prompt for the judge call.
 const JudgmentSystem = `You are a senior reviewer judging whether each candidate code artifact implements a Functional Requirement (FR).
 
-Return EXACTLY one JSON array — no prose, no markdown fence — with one object per candidate, using the candidate's "id" field:
+Return EXACTLY one JSON array — no prose, no markdown fence — with one object only for candidates that are "implements" or "drifts", using the candidate's "id" field. Omit unrelated candidates; omitted candidates are treated as "unrelated" by the caller:
 
 [
   {
     "artifact_id": int,                    // matches one of the candidate ids
-    "verdict":     "implements" | "drifts" | "unrelated",
+    "verdict":     "implements" | "drifts",
     "confidence":  number,                 // 0..1
     "evidence":    [                       // REQUIRED for implements/drifts
       {"file": string, "start": int, "end": int, "note": string}
@@ -36,12 +32,11 @@ Return EXACTLY one JSON array — no prose, no markdown fence — with one objec
 Verdict rules:
 - "implements" — the artifact concretely satisfies an acceptance criterion of the FR.
 - "drifts"     — the artifact does something similar (same surface area, different behaviour) and likely needs to converge with the FR.
-- "unrelated"  — the artifact has no meaningful overlap.
+- Omit artifacts with no meaningful overlap. Do not emit "unrelated" objects.
 
 Evidence rules (HARD):
 - Every "implements" or "drifts" verdict MUST include at least one evidence object whose file/start/end refer to the actual lines you cite.
-- An "unrelated" verdict has no evidence array (or [] is fine).
-- If you cannot ground a verdict in concrete lines, emit "unrelated".`
+- If you cannot ground a verdict in concrete lines, omit that artifact.`
 
 // BuildJudgmentUser composes the user-side prompt for one FR.
 func BuildJudgmentUser(fr FRSnapshot, anchors []Anchor, candidates []ArtifactCandidate) string {

@@ -9,18 +9,28 @@ import (
 
 	"github.com/cax/fsdtrace/internal/embed"
 	"github.com/cax/fsdtrace/internal/fsd"
+	"github.com/cax/fsdtrace/internal/llm"
 	"github.com/cax/fsdtrace/internal/match"
 )
 
 const (
+	// ProviderBedrock keeps the original KrakenD -> Bedrock behavior.
+	ProviderBedrock = "bedrock"
+	// ProviderOpenAI uses OpenAI directly for generation and embeddings.
+	ProviderOpenAI = "openai"
+
+	// EnvProvider selects the model provider: bedrock or openai.
+	EnvProvider = "FSDTRACE_PROVIDER"
 	// EnvEmbeddingModel overrides the embedding model.
 	EnvEmbeddingModel = "FSDTRACE_EMBEDDING_MODEL"
-	// EnvAtomizerModel overrides the Claude model used for FSD atomization.
+	// EnvAtomizerModel overrides the model used for FSD atomization.
 	EnvAtomizerModel = "FSDTRACE_ATOMIZER_MODEL"
-	// EnvJudgmentModel overrides the Claude model used for matching.
+	// EnvJudgmentModel overrides the model used for matching.
 	EnvJudgmentModel = "FSDTRACE_JUDGMENT_MODEL"
-	// EnvRejudgeModel overrides the stronger Claude model used for drift rejudging.
+	// EnvRejudgeModel overrides the stronger model used for drift rejudging.
 	EnvRejudgeModel = "FSDTRACE_REJUDGE_MODEL"
+	// EnvOpenAIBaseURL optionally overrides the OpenAI API base URL.
+	EnvOpenAIBaseURL = "FSDTRACE_OPENAI_BASE_URL"
 
 	// DefaultRejudgeModel is the built-in fallback when no flag, env, or
 	// config file value is provided.
@@ -37,11 +47,25 @@ const (
 )
 
 type appConfig struct {
+	provider string
+
 	bedrockBaseURL string
+	openAIBaseURL  string
+
 	embeddingModel string
 	atomizerModel  string
 	judgmentModel  string
 	rejudgeModel   string
+
+	bedrockEmbeddingModel string
+	bedrockAtomizerModel  string
+	bedrockJudgmentModel  string
+	bedrockRejudgeModel   string
+
+	openAIEmbeddingModel string
+	openAIAtomizerModel  string
+	openAIJudgmentModel  string
+	openAIRejudgeModel   string
 }
 
 func loadAppConfig(path string, getenv func(string) string) (appConfig, error) {
@@ -56,7 +80,9 @@ func loadAppConfig(path string, getenv func(string) string) (appConfig, error) {
 	}
 	cfg = fileCfg
 
+	cfg.provider = firstNonEmpty(getenv(EnvProvider), cfg.provider)
 	cfg.bedrockBaseURL = firstNonEmpty(getenv(EnvBedrockBaseURL), cfg.bedrockBaseURL)
+	cfg.openAIBaseURL = firstNonEmpty(getenv(EnvOpenAIBaseURL), cfg.openAIBaseURL)
 	cfg.embeddingModel = firstNonEmpty(getenv(EnvEmbeddingModel), cfg.embeddingModel)
 	cfg.atomizerModel = firstNonEmpty(getenv(EnvAtomizerModel), cfg.atomizerModel)
 	cfg.judgmentModel = firstNonEmpty(getenv(EnvJudgmentModel), cfg.judgmentModel)
@@ -68,22 +94,66 @@ func (c appConfig) model(kind modelKind, flagValue string, flagChanged bool) str
 	if flagChanged && strings.TrimSpace(flagValue) != "" {
 		return strings.TrimSpace(flagValue)
 	}
+	provider := c.activeProvider()
 	switch kind {
 	case modelEmbedding:
-		return firstNonEmpty(c.embeddingModel, embed.TitanModelID)
+		if provider == ProviderOpenAI {
+			return firstNonEmpty(c.embeddingModel, c.openAIEmbeddingModel, embed.OpenAIEmbeddingModelID)
+		}
+		return firstNonEmpty(c.embeddingModel, c.bedrockEmbeddingModel, embed.TitanModelID)
 	case modelAtomizer:
-		return firstNonEmpty(c.atomizerModel, fsd.DefaultAtomizerModel)
+		if provider == ProviderOpenAI {
+			return firstNonEmpty(c.atomizerModel, c.openAIAtomizerModel, llm.DefaultOpenAIModel)
+		}
+		return firstNonEmpty(c.atomizerModel, c.bedrockAtomizerModel, fsd.DefaultAtomizerModel)
 	case modelJudgment:
-		return firstNonEmpty(c.judgmentModel, match.DefaultJudgmentModel)
+		if provider == ProviderOpenAI {
+			return firstNonEmpty(c.judgmentModel, c.openAIJudgmentModel, llm.DefaultOpenAIModel)
+		}
+		return firstNonEmpty(c.judgmentModel, c.bedrockJudgmentModel, match.DefaultJudgmentModel)
 	case modelRejudge:
-		return firstNonEmpty(c.rejudgeModel, DefaultRejudgeModel)
+		if provider == ProviderOpenAI {
+			return firstNonEmpty(c.rejudgeModel, c.openAIRejudgeModel, llm.DefaultOpenAIModel)
+		}
+		return firstNonEmpty(c.rejudgeModel, c.bedrockRejudgeModel, DefaultRejudgeModel)
 	default:
 		return ""
 	}
 }
 
+func (c appConfig) providerName(flagValue string, flagChanged bool) (string, error) {
+	provider := c.provider
+	if flagChanged && strings.TrimSpace(flagValue) != "" {
+		provider = flagValue
+	}
+	provider = strings.ToLower(firstNonEmpty(provider, ProviderBedrock))
+	switch provider {
+	case ProviderBedrock, ProviderOpenAI:
+		return provider, nil
+	default:
+		return "", fmt.Errorf("unknown provider %q (want bedrock|openai)", provider)
+	}
+}
+
+func (c appConfig) withProvider(provider string) appConfig {
+	c.provider = provider
+	return c
+}
+
+func (c appConfig) activeProvider() string {
+	provider, err := c.providerName("", false)
+	if err != nil {
+		return ProviderBedrock
+	}
+	return provider
+}
+
 func (c appConfig) bedrockURL() string {
 	return strings.TrimSpace(c.bedrockBaseURL)
+}
+
+func (c appConfig) openAIURL() string {
+	return strings.TrimSpace(c.openAIBaseURL)
 }
 
 func readAppConfigFile(path string) (appConfig, error) {
@@ -181,16 +251,36 @@ func splitConfigLine(s string) (key, value string, ok bool) {
 func setConfigValue(cfg *appConfig, key, value string) {
 	value = strings.TrimSpace(value)
 	switch key {
+	case "provider", "model_provider":
+		cfg.provider = value
 	case "bedrock.base_url":
 		cfg.bedrockBaseURL = value
-	case "bedrock.embedding_model", "embedding_model":
+	case "openai.base_url":
+		cfg.openAIBaseURL = value
+	case "embedding_model":
 		cfg.embeddingModel = value
-	case "bedrock.atomizer_model", "atomizer_model":
+	case "atomizer_model":
 		cfg.atomizerModel = value
-	case "bedrock.judgment_model", "judgment_model":
+	case "judgment_model":
 		cfg.judgmentModel = value
-	case "bedrock.rejudge_model", "rejudge_model":
+	case "rejudge_model":
 		cfg.rejudgeModel = value
+	case "bedrock.embedding_model":
+		cfg.bedrockEmbeddingModel = value
+	case "bedrock.atomizer_model":
+		cfg.bedrockAtomizerModel = value
+	case "bedrock.judgment_model":
+		cfg.bedrockJudgmentModel = value
+	case "bedrock.rejudge_model":
+		cfg.bedrockRejudgeModel = value
+	case "openai.embedding_model":
+		cfg.openAIEmbeddingModel = value
+	case "openai.atomizer_model":
+		cfg.openAIAtomizerModel = value
+	case "openai.judgment_model":
+		cfg.openAIJudgmentModel = value
+	case "openai.rejudge_model":
+		cfg.openAIRejudgeModel = value
 	}
 }
 

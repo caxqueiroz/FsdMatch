@@ -20,10 +20,11 @@ func newEmbedCmd() *cobra.Command {
 		what           string
 		embeddingModel string
 		cassettePath   string
+		providerFlag   string
 	)
 	cmd := &cobra.Command{
 		Use:   "embed",
-		Short: "Compute embeddings via Bedrock and populate vec0",
+		Short: "Compute embeddings and populate vec0",
 		Long: `Recomputes vec0 rows for existing features and/or code artifacts.
 This is useful after importing rows, changing the embedding model, or
 repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
@@ -40,6 +41,11 @@ repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
 			if err != nil {
 				return err
 			}
+			var provider string
+			cfg, provider, err = resolveProvider(cfg, providerFlag, cmd.Flags().Changed("provider"))
+			if err != nil {
+				return err
+			}
 			embeddingModel := cfg.model(modelEmbedding, embeddingModel, cmd.Flags().Changed("embedding-model"))
 
 			d, err := db.Open(ctx, opts.dbPath)
@@ -51,11 +57,10 @@ repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
 				return err
 			}
 
-			bedrock, err := newBedrockClient(cassettePath, cfg)
+			emb, err := newEmbedder(provider, cassettePath, cfg, embeddingModel, embed.PurposeDocument)
 			if err != nil {
 				return err
 			}
-			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeDocument)
 			summary, err := embedExistingRows(ctx, d, emb, what)
 			if err != nil {
 				return err
@@ -68,7 +73,8 @@ repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
 		},
 	}
 	cmd.Flags().StringVar(&what, "what", "all", "what to embed: features|artifacts|all")
-	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
+	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	cmd.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return cmd
 }

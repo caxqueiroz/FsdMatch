@@ -11,14 +11,10 @@ import (
 const AtomizerPromptVersion = "fsd-atomize-v1"
 
 // DefaultAtomizerModel is the Bedrock Anthropic model used for FSD
-// atomization. Override via config.
+// atomization when provider=bedrock. Override via config.
 const DefaultAtomizerModel = "anthropic.claude-sonnet-4-v2:0"
 
-// BedrockAnthropicVersion is the required `anthropic_version` field for
-// the Bedrock-hosted Claude Messages API.
-const BedrockAnthropicVersion = "bedrock-2023-05-31"
-
-// AtomizerSystem describes the task to Claude. Kept short, declarative,
+// AtomizerSystem describes the atomization task. Kept short, declarative,
 // and grounded in the schema columns.
 const AtomizerSystem = `You are an analyst extracting one Functional Requirement (FR) from a slice of a Functional Specification Document.
 

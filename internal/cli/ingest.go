@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,10 +11,6 @@ import (
 	"github.com/cax/fsdtrace/internal/embed"
 	"github.com/cax/fsdtrace/internal/fsd"
 )
-
-// EnvBedrockBaseURL is the env variable read for the Bedrock route. The
-// CLI never hardcodes the AWS endpoint (CLAUDE.md hard constraint).
-const EnvBedrockBaseURL = "BEDROCK_BASE_URL"
 
 func newIngestCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -32,24 +27,30 @@ func newIngestFsdCmd() *cobra.Command {
 		atomizerModel  string
 		embeddingModel string
 		cassettePath   string
+		providerFlag   string
 	)
 	c := &cobra.Command{
 		Use:   "fsd <path>",
 		Short: "Atomize an FSD file into FR objects and embed them",
-		Long: `Splits the FSD by anchor (default FR-\d+), calls Claude on Bedrock to
-extract structured Functional Requirements, embeds each FR via Bedrock,
+		Long: `Splits the FSD by FR anchor, calls the configured model to
+extract structured Functional Requirements, embeds each FR,
 and stores both in the SQLite database. Re-runs are idempotent: features
 are upserted by id and feature_vec rows replaced.
 
-Bedrock access is via the BEDROCK_BASE_URL env variable (a KrakenD route).
-The --cassette flag substitutes a recorded responses file, used by tests
-and offline smoke runs.`,
+Use --provider bedrock (default) with BEDROCK_BASE_URL, or --provider openai
+with OPENAI_API_KEY. The --cassette flag substitutes a recorded Bedrock
+responses file, used by tests and offline smoke runs.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalCtx()
 			defer cancel()
 
 			cfg, err := loadAppConfig(opts.cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			var provider string
+			cfg, provider, err = resolveProvider(cfg, providerFlag, cmd.Flags().Changed("provider"))
 			if err != nil {
 				return err
 			}
@@ -74,13 +75,15 @@ and offline smoke runs.`,
 				return err
 			}
 
-			bedrock, err := newBedrockClient(cassettePath, cfg)
+			generator, err := newGenerator(provider, cassettePath, cfg)
 			if err != nil {
 				return err
 			}
-
-			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeDocument)
-			atomizer := fsd.NewAtomizer(d, bedrock, emb,
+			emb, err := newEmbedder(provider, cassettePath, cfg, embeddingModel, embed.PurposeDocument)
+			if err != nil {
+				return err
+			}
+			atomizer := fsd.NewAtomizer(d, generator, emb,
 				fsd.WithModel(atomizerModel),
 				fsd.WithLogger(slog.Default()))
 
@@ -98,29 +101,9 @@ and offline smoke runs.`,
 		},
 	}
 	c.Flags().StringVar(&anchorPattern, "anchor-pattern", fsd.DefaultAnchorPattern, "regex used to split chunks")
-	c.Flags().StringVar(&atomizerModel, "atomizer-model", "", "Bedrock Claude model id for atomization (flag > env > config > default)")
-	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
+	c.Flags().StringVar(&providerFlag, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
+	c.Flags().StringVar(&atomizerModel, "atomizer-model", "", "model id for atomization (flag > env > config > provider default)")
+	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return c
-}
-
-// newBedrockClient builds a BedrockClient honouring the env variable
-// and an optional cassette file.
-func newBedrockClient(cassettePath string, cfg appConfig) (*embed.BedrockClient, error) {
-	if cassettePath != "" {
-		cas, err := embed.LoadCassette(cassettePath)
-		if err != nil {
-			return nil, err
-		}
-		// Cassette plays back URL-independently; any non-empty base is fine.
-		return embed.NewClient("https://cassette.local",
-			embed.WithHTTPClient(cas.HTTPClient()))
-	}
-	base := cfg.bedrockURL()
-	if base == "" {
-		return nil, fmt.Errorf("%s is unset; set it to the KrakenD route or pass --cassette",
-			EnvBedrockBaseURL)
-	}
-	return embed.NewClient(base,
-		embed.WithHTTPClient(&http.Client{Timeout: 90 * time.Second}))
 }

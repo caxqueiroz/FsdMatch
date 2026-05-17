@@ -13,7 +13,7 @@ func registerTools(mcpSrv *server.MCPServer, s *Server) {
 		"fsd_search_features",
 		mcp.WithDescription("Semantic search over Functional Requirement (FR) rows using configured embeddings. Returns id, title, section, acceptance, and KNN distance. Example: query='POST /api/v1/orders'."),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("query", mcp.Description("Free-text search prompt; embedded with the configured Bedrock embedding model."), mcp.Required()),
+		mcp.WithString("query", mcp.Description("Free-text search prompt; embedded with the configured provider/model."), mcp.Required()),
 		mcp.WithNumber("top_k", mcp.Description("How many results to return (default 10).")),
 	), s.handleSearchFeatures)
 
@@ -21,7 +21,7 @@ func registerTools(mcpSrv *server.MCPServer, s *Server) {
 		"fsd_search_code",
 		mcp.WithDescription("Semantic search over indexed code artifacts. Returns id, kind, identifier, file:line, signature, and distance. Optionally filter by kind (e.g. rest_endpoint, kafka_listener)."),
 		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("query", mcp.Description("Free-text search prompt; embedded with the configured Bedrock embedding model."), mcp.Required()),
+		mcp.WithString("query", mcp.Description("Free-text search prompt; embedded with the configured provider/model."), mcp.Required()),
 		mcp.WithString("kind", mcp.Description("Restrict to one artifact kind, e.g. rest_endpoint, kafka_listener, scheduled_job, security_rule, entity, config_props, exception_handler.")),
 		mcp.WithNumber("top_k", mcp.Description("How many results to return (default 10).")),
 	), s.handleSearchCode)
@@ -74,7 +74,7 @@ func registerTools(mcpSrv *server.MCPServer, s *Server) {
 
 	mcpSrv.AddTool(mcp.NewTool(
 		"fsd_rematch_feature",
-		mcp.WithDescription("Re-run the matcher pipeline for one FR and persist the result. NOT read-only — costs one Bedrock judgment call. Requires BEDROCK_BASE_URL."),
+		mcp.WithDescription("Re-run the matcher pipeline for one FR and persist the result. NOT read-only — costs one judgment call. Requires the selected provider to be configured."),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithString("id", mcp.Description("FR identifier, e.g. FR-042."), mcp.Required()),
 		mcp.WithString("run_id", mcp.Description("Run id to upsert the matches under (default: rematch-<unix-ts>).")),

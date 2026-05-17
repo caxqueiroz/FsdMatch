@@ -44,6 +44,32 @@ US-2: do another`
 	}
 }
 
+func TestParseMarkdownDefaultPatternSupportsScopedFRIDs(t *testing.T) {
+	src := `# FSD
+## Functional Requirements
+**FR-HOME-1** - show the home page.
+**FR-I18N-3** - verify locale sync.
+## Non-functional Requirements
+- **NFR-PERF-1** - cache static assets.`
+
+	chunks, err := ParseMarkdown(src, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks", len(chunks))
+	}
+	if chunks[0].Anchor != "FR-HOME-1" {
+		t.Fatalf("chunk 0 anchor = %q", chunks[0].Anchor)
+	}
+	if chunks[1].Anchor != "FR-I18N-3" {
+		t.Fatalf("chunk 1 anchor = %q", chunks[1].Anchor)
+	}
+	if strings.Contains(chunks[1].Text, "NFR-PERF-1") {
+		t.Fatalf("NFR section should not be folded into the last FR chunk: %q", chunks[1].Text)
+	}
+}
+
 func TestParseMarkdownInvalidPattern(t *testing.T) {
 	if _, err := ParseMarkdown("", "FR-[a-"); err == nil {
 		t.Fatal("expected regex error")

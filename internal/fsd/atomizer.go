@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/cax/fsdtrace/internal/db"
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
 // Feature mirrors the features table columns, with JSON-shaped fields
@@ -64,19 +64,19 @@ func FeatureRowID(id string) int64 {
 // Atomizer turns FSD chunks into Feature rows and embeddings, writing
 // both atomically through the single-writer goroutine.
 type Atomizer struct {
-	bedrock  *embed.BedrockClient
-	embedder embed.Embedder
-	cache    *embed.Cache
-	d        *db.DB
-	model    string
-	maxTok   int
-	logger   *slog.Logger
+	generator llm.Generator
+	embedder  embed.Embedder
+	cache     *embed.Cache
+	d         *db.DB
+	model     string
+	maxTok    int
+	logger    *slog.Logger
 }
 
 // AtomizerOption configures an Atomizer.
 type AtomizerOption func(*Atomizer)
 
-// WithModel overrides the default Claude model.
+// WithModel overrides the default atomization model.
 func WithModel(m string) AtomizerOption { return func(a *Atomizer) { a.model = m } }
 
 // WithMaxTokens overrides the per-call max output tokens (default 2048).
@@ -86,15 +86,15 @@ func WithMaxTokens(n int) AtomizerOption { return func(a *Atomizer) { a.maxTok =
 func WithLogger(l *slog.Logger) AtomizerOption { return func(a *Atomizer) { a.logger = l } }
 
 // NewAtomizer constructs an Atomizer.
-func NewAtomizer(d *db.DB, bedrock *embed.BedrockClient, embedder embed.Embedder, opts ...AtomizerOption) *Atomizer {
+func NewAtomizer(d *db.DB, generator llm.Generator, embedder embed.Embedder, opts ...AtomizerOption) *Atomizer {
 	a := &Atomizer{
-		bedrock:  bedrock,
-		embedder: embedder,
-		cache:    embed.NewCache(d),
-		d:        d,
-		model:    DefaultAtomizerModel,
-		maxTok:   2048,
-		logger:   slog.Default(),
+		generator: generator,
+		embedder:  embedder,
+		cache:     embed.NewCache(d),
+		d:         d,
+		model:     DefaultAtomizerModel,
+		maxTok:    2048,
+		logger:    slog.Default(),
 	}
 	for _, o := range opts {
 		o(a)
@@ -142,43 +142,15 @@ func (a *Atomizer) Ingest(ctx context.Context, chunks []Chunk, runID string) (*I
 	return out, nil
 }
 
-// bedrockMessage is the Anthropic-on-Bedrock messages payload.
-type bedrockMessage struct {
-	AnthropicVersion string                `json:"anthropic_version"`
-	MaxTokens        int                   `json:"max_tokens"`
-	System           string                `json:"system,omitempty"`
-	Messages         []bedrockMessageEntry `json:"messages"`
-}
-
-type bedrockMessageEntry struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type bedrockMessageResponse struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	StopReason string `json:"stop_reason"`
-}
-
 func (a *Atomizer) atomizeChunk(ctx context.Context, ch Chunk) (Feature, error) {
-	req := bedrockMessage{
-		AnthropicVersion: BedrockAnthropicVersion,
-		MaxTokens:        a.maxTok,
-		System:           AtomizerSystem,
-		Messages: []bedrockMessageEntry{
-			{Role: "user", Content: BuildAtomizerUserMessage(ch.Anchor, ch.Section, ch.Text)},
-		},
-	}
-	var resp bedrockMessageResponse
-	if err := a.bedrock.Invoke(ctx, a.model, req, &resp); err != nil {
+	text, err := a.generator.Generate(ctx, llm.GenerateRequest{
+		Model:     a.model,
+		System:    AtomizerSystem,
+		User:      BuildAtomizerUserMessage(ch.Anchor, ch.Section, ch.Text),
+		MaxTokens: a.maxTok,
+	})
+	if err != nil {
 		return Feature{}, err
-	}
-	text := joinResponseText(resp)
-	if text == "" {
-		return Feature{}, errors.New("atomizer: empty response")
 	}
 	var f Feature
 	if err := json.Unmarshal([]byte(stripFence(text)), &f); err != nil {
@@ -190,16 +162,6 @@ func (a *Atomizer) atomizeChunk(ctx context.Context, ch Chunk) (Feature, error) 
 		f.ID = ch.Anchor
 	}
 	return f, nil
-}
-
-func joinResponseText(r bedrockMessageResponse) string {
-	var b strings.Builder
-	for _, c := range r.Content {
-		if c.Type == "text" {
-			b.WriteString(c.Text)
-		}
-	}
-	return strings.TrimSpace(b.String())
 }
 
 // stripFence removes a leading ```json ... ``` fence if present. The

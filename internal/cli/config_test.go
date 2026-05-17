@@ -7,6 +7,7 @@ import (
 
 	"github.com/cax/fsdtrace/internal/embed"
 	"github.com/cax/fsdtrace/internal/fsd"
+	"github.com/cax/fsdtrace/internal/llm"
 	"github.com/cax/fsdtrace/internal/match"
 )
 
@@ -120,5 +121,55 @@ bedrock:
 	}
 	if got := cfg.model(modelEmbedding, "", false); got == embed.TitanModelID {
 		t.Fatalf("expected file value to override default")
+	}
+}
+
+func TestOpenAIProviderDefaults(t *testing.T) {
+	cfg := appConfig{provider: ProviderOpenAI}
+
+	if got := cfg.model(modelEmbedding, "", false); got != embed.OpenAIEmbeddingModelID {
+		t.Fatalf("embedding default = %q", got)
+	}
+	if got := cfg.model(modelAtomizer, "", false); got != llm.DefaultOpenAIModel {
+		t.Fatalf("atomizer default = %q", got)
+	}
+	if got := cfg.model(modelJudgment, "", false); got != llm.DefaultOpenAIModel {
+		t.Fatalf("judgment default = %q", got)
+	}
+	if got := cfg.model(modelRejudge, "", false); got != llm.DefaultOpenAIModel {
+		t.Fatalf("rejudge default = %q", got)
+	}
+}
+
+func TestProviderConfigPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "fsdtrace.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`provider: bedrock`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadAppConfig(cfgPath, func(k string) string {
+		if k == EnvProvider {
+			return ProviderOpenAI
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider, err := cfg.providerName("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider != ProviderOpenAI {
+		t.Fatalf("env provider = %q", provider)
+	}
+	provider, err = cfg.providerName(ProviderBedrock, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider != ProviderBedrock {
+		t.Fatalf("flag provider = %q", provider)
 	}
 }
