@@ -91,6 +91,11 @@ cross-platform release automation, both deferred per SPEC).
   Embed v3/v4 model IDs now use Cohere request/response shapes. Cohere stored
   rows are embedded with `search_document`, matcher/MCP lookup vectors use
   `search_query`, and Cohere v4 is forced to the existing 1024-dim vec0 schema.
+- 2026-05-17 — Added the v1.0 GitHub tracing workflow. `fsdtrace trace github
+  <url> --fsd <path>` downloads a public GitHub repository via the zipball API
+  and runs the existing init/ingest/index/match/report pipeline. Added a
+  Spring PetClinic sample FSD under `examples/petclinic/`, Taskfile
+  `trace-github` shortcuts, and bumped the reported MCP/CLI version to 1.0.0.
 
 ## Next steps (post-Phase 7)
 

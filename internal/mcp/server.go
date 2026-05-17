@@ -24,7 +24,7 @@ import (
 
 // Version is the fsdtrace server version reported via the MCP
 // initialize handshake.
-const Version = "0.1.0"
+const Version = "1.0.0"
 
 // EnvBedrockBaseURL mirrors the CLI env name; tools that need Bedrock
 // (search + rematch) read it on first use.

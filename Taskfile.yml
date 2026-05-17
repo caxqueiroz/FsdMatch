@@ -6,6 +6,7 @@ vars:
   OUT: '{{.OUT | default "./trace"}}'
   FSD: '{{.FSD | default "./testdata/fsd-sample.md"}}'
   REPO: '{{.REPO | default "./testdata/sample-spring-app"}}'
+  GITHUB_REPO: '{{.GITHUB_REPO | default ""}}'
   DEMO_FSD_CASSETTE: './testdata/fsd-sample.cassette.json'
   DEMO_INDEX_CASSETTE: './testdata/sample-spring-app.cassette.json'
   DEMO_MATCH_CASSETTE: './testdata/match.cassette.json'
@@ -72,6 +73,19 @@ tasks:
       - '{{.BIN}} --db "{{.DB}}" match{{if .MATCH_CASSETTE}} --cassette "{{.MATCH_CASSETTE}}"{{end}}'
       - '{{.BIN}} --db "{{.DB}}" report --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
 
+  trace-github:
+    desc: Download a GitHub repo and run the full fsdtrace pipeline
+    deps:
+      - build
+    cmds:
+      - |
+        if [ -z "{{.GITHUB_REPO}}" ] || [ "{{.FSD}}" = "./testdata/fsd-sample.md" ]; then
+          echo "usage: task trace-github GITHUB_REPO=https://github.com/owner/repo FSD=/path/to/fsd.md"
+          echo "set BEDROCK_BASE_URL or pass cassette vars for offline playback"
+          exit 2
+        fi
+      - '{{.BIN}} --db "{{.DB}}" trace github "{{.GITHUB_REPO}}" --fsd "{{.FSD}}" --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .FSD_CASSETTE}} --fsd-cassette "{{.FSD_CASSETTE}}"{{end}}{{if .INDEX_CASSETTE}} --index-cassette "{{.INDEX_CASSETTE}}"{{end}}{{if .MATCH_CASSETTE}} --match-cassette "{{.MATCH_CASSETTE}}"{{end}}{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
+
   status:
     desc: Show the current fsdtrace database summary
     deps:
@@ -92,10 +106,12 @@ tasks:
       - build
     cmds:
       - rm -rf "{{.DIST_DIR}}" "./dist/{{.DIST_NAME}}.zip"
-      - mkdir -p "{{.DIST_DIR}}/bin" "{{.DIST_DIR}}/testdata"
+      - mkdir -p "{{.DIST_DIR}}/bin" "{{.DIST_DIR}}/testdata" "{{.DIST_DIR}}/examples/petclinic"
       - cp "{{.BIN}}" "{{.DIST_DIR}}/bin/fsdtrace"
       - cp README.md "{{.DIST_DIR}}/README.md"
+      - cp CHANGELOG.md "{{.DIST_DIR}}/CHANGELOG.md"
       - cp packaging/Taskfile.yml "{{.DIST_DIR}}/Taskfile.yml"
+      - cp examples/petclinic/fsd.md "{{.DIST_DIR}}/examples/petclinic/fsd.md"
       - cp testdata/fsd-sample.md "{{.DIST_DIR}}/testdata/fsd-sample.md"
       - cp testdata/fsd-sample.cassette.json "{{.DIST_DIR}}/testdata/fsd-sample.cassette.json"
       - cp testdata/sample-spring-app.cassette.json "{{.DIST_DIR}}/testdata/sample-spring-app.cassette.json"

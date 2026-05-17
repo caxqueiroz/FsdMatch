@@ -28,6 +28,16 @@ The binary is written to:
 ./bin/fsdtrace --db ./fsdtrace.db report --format html --out ./trace/
 ```
 
+For a GitHub-hosted Spring project, use the end-to-end wrapper:
+
+```bash
+./bin/fsdtrace --db ./petclinic.db trace github \
+  https://github.com/spring-projects/spring-petclinic \
+  --fsd examples/petclinic/fsd.md \
+  --out ./trace/petclinic \
+  --format html
+```
+
 Live atomization, embedding, and judgment calls require:
 
 ```bash
@@ -53,6 +63,13 @@ Run against a real FSD and Spring Boot repo:
 
 ```bash
 task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo
+```
+
+Run against Spring PetClinic from GitHub:
+
+```bash
+task trace-github GITHUB_REPO=https://github.com/spring-projects/spring-petclinic \
+  FSD=examples/petclinic/fsd.md OUT=./trace/petclinic
 ```
 
 That real run uses live Bedrock through `BEDROCK_BASE_URL` unless cassette
@@ -101,6 +118,8 @@ The zip contains:
 - `bin/fsdtrace`
 - `Taskfile.yml`
 - `README.md`
+- `CHANGELOG.md`
+- `examples/petclinic/fsd.md`
 - `demo/fsdtrace.db`
 - bundled sample FSD, sample Spring app, and recorded Bedrock cassettes
 

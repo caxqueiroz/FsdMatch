@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"github.com/spf13/cobra"
+
+	"github.com/cax/fsdtrace/internal/mcp"
 )
 
 // globalOpts are populated by RootCmd persistent flags.
@@ -29,6 +31,7 @@ func NewRootCmd() *cobra.Command {
 		Use:           "fsdtrace",
 		Short:         "Validate an FSD against a Java/Spring Boot codebase",
 		Long:          "fsdtrace atomizes a Functional Specification Document, indexes a Spring Boot codebase, and produces a traceability matrix with file:line evidence.",
+		Version:       mcp.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(*cobra.Command, []string) error {
@@ -48,6 +51,7 @@ func NewRootCmd() *cobra.Command {
 		newEmbedCmd(),
 		newMatchCmd(),
 		newReportCmd(),
+		newTraceCmd(),
 		newMCPCmd(),
 		newInstallClaudeCodeCmd(),
 		newStatusCmd(),

@@ -125,6 +125,7 @@ fsdtrace index code <repo>          # run scip-java + annotation harvest
 fsdtrace embed [--what features|artifacts|all]
 fsdtrace match [--fr FR-042] [--top-k 15]
 fsdtrace report --format md|csv|html|json --out ./trace/
+fsdtrace trace github <url> --fsd <path>  # download GitHub repo and run full pipeline
 fsdtrace mcp serve [--transport stdio|sse]
 fsdtrace install-claude-code        # writes Claude Code MCP config entry
 fsdtrace status                     # latest run summary
@@ -133,6 +134,11 @@ fsdtrace status                     # latest run summary
 Global flags: `--db`, `--config`, `--log-level`, `--run-id`.
 
 The full pipeline is: `init → ingest fsd → index code → embed → match → report`.
+`trace github` is an additive convenience wrapper over that pipeline. It accepts
+only `https://github.com/<owner>/<repo>` URLs, downloads the selected ref through
+GitHub's zipball API, extracts it into a temporary directory by default, and
+then runs the same FSD ingestion, code indexing, matching, and report generation
+steps. Existing lower-level subcommands remain the stable primitive interface.
 
 ---
 
