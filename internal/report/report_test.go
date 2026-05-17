@@ -58,6 +58,10 @@ func seedReportFixture(t *testing.T, d *db.DB) {
 	      VALUES(102,'rest_endpoint','GET /api/v1/notes/{id}','NoteController.java',16,22,'x')`)
 	exec(`INSERT INTO code_artifacts(id,kind,identifier,file,start_line,end_line,run_id)
 	      VALUES(103,'kafka_listener','kafka topics=other-events','Listener.java',8,12,'x')`)
+	exec(`INSERT INTO code_artifacts(id,kind,identifier,file,start_line,end_line,run_id)
+	      VALUES(104,'service_method','com.example.NoteService.create','NoteService.java',9,18,'x')`)
+	exec(`INSERT INTO relationships(from_artifact,to_artifact,kind)
+	      VALUES(101,104,'calls')`)
 
 	exec(`INSERT INTO tests(name,file,line,test_kind,target_artifact,run_id)
 	      VALUES('createNoteOk','NoteControllerTest.java',14,'WebMvcTest',101,'x')`)
@@ -151,6 +155,41 @@ func TestLoad_BuildsExpectedReportShape(t *testing.T) {
 	}
 }
 
+func TestLoadWithOptions_IncludesCallGraphSupportOnlyWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	d := setupReportDB(t)
+	seedReportFixture(t, d)
+
+	surfaceOnly, err := Load(ctx, d, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findMatch(t, surfaceOnly, "FR-010", 101).SupportingArtifacts; len(got) != 0 {
+		t.Fatalf("default Load included call graph support: %+v", got)
+	}
+
+	withGraph, err := LoadWithOptions(ctx, d, "run-1", Options{IncludeCallGraph: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !withGraph.IncludeCallGraph {
+		t.Fatal("IncludeCallGraph flag not reflected in report")
+	}
+	fc := findFeature(t, withGraph, "FR-010")
+	if fc.SupportingArtifacts != 1 {
+		t.Fatalf("FR-010 SupportingArtifacts = %d, want 1", fc.SupportingArtifacts)
+	}
+	m := findMatch(t, withGraph, "FR-010", 101)
+	if len(m.SupportingArtifacts) != 1 {
+		t.Fatalf("supporting artifacts = %+v, want one", m.SupportingArtifacts)
+	}
+	support := m.SupportingArtifacts[0]
+	if support.ArtifactID != 104 || support.Kind != "service_method" ||
+		support.Identifier != "com.example.NoteService.create" || support.Depth != 1 {
+		t.Fatalf("support artifact mismatch: %+v", support)
+	}
+}
+
 func TestWriteMarkdown_ProducesThreeAcceptanceFiles(t *testing.T) {
 	ctx := context.Background()
 	d := setupReportDB(t)
@@ -191,6 +230,31 @@ func TestWriteMarkdown_ProducesThreeAcceptanceFiles(t *testing.T) {
 	orph := mustReadFile(t, filepath.Join(out, "orphans.md"))
 	if !strings.Contains(orph, "kafka topics=other-events") {
 		t.Errorf("orphans.md missing kafka listener:\n%s", orph)
+	}
+}
+
+func TestWriteMarkdown_IncludesCallGraphSupportWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	d := setupReportDB(t)
+	seedReportFixture(t, d)
+
+	r, err := LoadWithOptions(ctx, d, "run-1", Options{IncludeCallGraph: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := WriteMarkdown(r, out); err != nil {
+		t.Fatal(err)
+	}
+	cov := mustReadFile(t, filepath.Join(out, "coverage.md"))
+	for _, want := range []string{
+		"SCIP Support",
+		"SCIP support for `POST /api/v1/notes`",
+		"com.example.NoteService.create",
+	} {
+		if !strings.Contains(cov, want) {
+			t.Errorf("coverage.md missing %q:\n%s", want, cov)
+		}
 	}
 }
 
@@ -300,4 +364,29 @@ func mustReadFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func findFeature(t *testing.T, r *Report, featureID string) FeatureCoverage {
+	t.Helper()
+	for _, s := range r.Sections {
+		for _, f := range s.Features {
+			if f.ID == featureID {
+				return f
+			}
+		}
+	}
+	t.Fatalf("feature %s not found", featureID)
+	return FeatureCoverage{}
+}
+
+func findMatch(t *testing.T, r *Report, featureID string, artifactID int64) MatchRow {
+	t.Helper()
+	f := findFeature(t, r, featureID)
+	for _, m := range f.Matches {
+		if m.ArtifactID == artifactID {
+			return m
+		}
+	}
+	t.Fatalf("match %s/%d not found", featureID, artifactID)
+	return MatchRow{}
 }

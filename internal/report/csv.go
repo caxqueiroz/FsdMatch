@@ -39,7 +39,7 @@ func writeMatchesCSV(r *Report, path string) error {
 		"run_id", "feature_id", "feature_title", "section",
 		"artifact_id", "kind", "identifier", "file", "start_line", "end_line",
 		"verdict", "confidence", "tested", "test_count",
-		"evidence_files", "notes",
+		"evidence_files", "supporting_artifact_count", "supporting_artifacts", "notes",
 	}); err != nil {
 		return err
 	}
@@ -53,7 +53,8 @@ func writeMatchesCSV(r *Report, path string) error {
 					m.File, strconv.Itoa(m.StartLine), strconv.Itoa(m.EndLine),
 					m.Verdict, fmt.Sprintf("%.4f", m.Confidence),
 					strconv.FormatBool(m.Tested), strconv.Itoa(m.TestCount),
-					evidenceFilesString(m.Evidence), m.Notes,
+					evidenceFilesString(m.Evidence), strconv.Itoa(len(m.SupportingArtifacts)),
+					supportArtifactsString(m.SupportingArtifacts), m.Notes,
 				}
 				if err := w.Write(row); err != nil {
 					return err
@@ -126,6 +127,18 @@ func evidenceFilesString(ev []Evidence) string {
 	parts := make([]string, 0, len(ev))
 	for _, e := range ev {
 		parts = append(parts, fmt.Sprintf("%s:%d-%d", e.File, e.Start, e.End))
+	}
+	return strings.Join(parts, ";")
+}
+
+func supportArtifactsString(arts []SupportArtifact) string {
+	if len(arts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(arts))
+	for _, a := range arts {
+		parts = append(parts, fmt.Sprintf("depth=%d %s %s %s:%d-%d",
+			a.Depth, a.Kind, a.Identifier, a.File, a.StartLine, a.EndLine))
 	}
 	return strings.Join(parts, ";")
 }

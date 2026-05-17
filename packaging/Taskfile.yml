@@ -1,0 +1,58 @@
+version: '3'
+
+vars:
+  BIN: '{{.BIN | default "./bin/fsdtrace"}}'
+  DB: '{{.DB | default "./fsdtrace.db"}}'
+  OUT: '{{.OUT | default "./trace"}}'
+  FSD: '{{.FSD | default "./testdata/fsd-sample.md"}}'
+  REPO: '{{.REPO | default "./testdata/sample-spring-app"}}'
+  FSD_CASSETTE: '{{.FSD_CASSETTE | default ""}}'
+  INDEX_CASSETTE: '{{.INDEX_CASSETTE | default ""}}'
+  MATCH_CASSETTE: '{{.MATCH_CASSETTE | default ""}}'
+  REPORT_FORMAT: '{{.REPORT_FORMAT | default "html"}}'
+  INCLUDE_CALL_GRAPH: '{{.INCLUDE_CALL_GRAPH | default "false"}}'
+  DEMO_DB: './demo/fsdtrace.db'
+  SCIP: '{{.SCIP | default "false"}}'
+  SCIP_INDEX: '{{.SCIP_INDEX | default ""}}'
+
+tasks:
+  default:
+    desc: Run the bundled offline sample
+    cmds:
+      - task: run
+
+  run:
+    desc: Render the bundled offline demo report
+    cmds:
+      - '{{.BIN}} --db "{{.DEMO_DB}}" status'
+      - '{{.BIN}} --db "{{.DEMO_DB}}" report --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
+
+  trace:
+    desc: Run fsdtrace against a real FSD and Spring repo
+    cmds:
+      - |
+        if [ "{{.FSD}}" = "./testdata/fsd-sample.md" ] || [ "{{.REPO}}" = "./testdata/sample-spring-app" ]; then
+          echo "usage: task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo"
+          echo "set BEDROCK_BASE_URL or pass cassette vars for offline playback"
+          exit 2
+        fi
+      - '{{.BIN}} --db "{{.DB}}" init'
+      - '{{.BIN}} --db "{{.DB}}" ingest fsd "{{.FSD}}"{{if .FSD_CASSETTE}} --cassette "{{.FSD_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" index code "{{.REPO}}"{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .SCIP_INDEX}} --scip-index "{{.SCIP_INDEX}}"{{end}}{{if .INDEX_CASSETTE}} --cassette "{{.INDEX_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" match{{if .MATCH_CASSETTE}} --cassette "{{.MATCH_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" report --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
+
+  status:
+    desc: Show the current fsdtrace database summary
+    cmds:
+      - '{{.BIN}} --db "{{.DB}}" status'
+
+  mcp:
+    desc: Start the MCP server over stdio
+    cmds:
+      - '{{.BIN}} --db "{{.DB}}" mcp serve'
+
+  clean:
+    desc: Remove generated local outputs
+    cmds:
+      - rm -rf "{{.DB}}" "{{.DB}}-shm" "{{.DB}}-wal" "{{.OUT}}"

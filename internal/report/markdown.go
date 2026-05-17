@@ -67,8 +67,13 @@ func renderCoverageMD(w io.Writer, r *Report) error {
 			s.Total, s.Implemented, s.Drifts, s.Missing); err != nil {
 			return err
 		}
+		if r.IncludeCallGraph {
+			if _, err := fmt.Fprintf(w, "SCIP supporting artifacts: %d\n\n", s.SupportingArtifacts); err != nil {
+				return err
+			}
+		}
 		for _, f := range s.Features {
-			if err := renderFeatureMD(w, f); err != nil {
+			if err := renderFeatureMD(w, r, f); err != nil {
 				return err
 			}
 		}
@@ -81,6 +86,29 @@ func renderRollup(w io.Writer, r *Report) error {
 		return err
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	if r.IncludeCallGraph {
+		if _, err := fmt.Fprintln(w, "| Section | Total | Implemented | Drifts | Missing | SCIP Support |"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "|---|---:|---:|---:|---:|---:|"); err != nil {
+			return err
+		}
+		var t, i, d, m, support int
+		for _, s := range r.Sections {
+			if _, err := fmt.Fprintf(w, "| %s | %d | %d | %d | %d | %d |\n",
+				escapePipes(s.Name), s.Total, s.Implemented, s.Drifts, s.Missing, s.SupportingArtifacts); err != nil {
+				return err
+			}
+			t += s.Total
+			i += s.Implemented
+			d += s.Drifts
+			m += s.Missing
+			support += s.SupportingArtifacts
+		}
+		_, err := fmt.Fprintf(w, "| **Total** | **%d** | **%d** | **%d** | **%d** | **%d** |\n\n",
+			t, i, d, m, support)
 		return err
 	}
 	if _, err := fmt.Fprintln(w, "| Section | Total | Implemented | Drifts | Missing |"); err != nil {
@@ -104,31 +132,22 @@ func renderRollup(w io.Writer, r *Report) error {
 	return err
 }
 
-func renderFeatureMD(w io.Writer, f FeatureCoverage) error {
+func renderFeatureMD(w io.Writer, r *Report, f FeatureCoverage) error {
 	badge := strings.ToUpper(string(f.Status))
 	if _, err := fmt.Fprintf(w, "### %s — %s — %s\n\n", f.ID, escapePipes(f.Title), badge); err != nil {
 		return err
+	}
+	if r.IncludeCallGraph && f.SupportingArtifacts > 0 {
+		if _, err := fmt.Fprintf(w, "_SCIP support artifacts: %d_\n\n", f.SupportingArtifacts); err != nil {
+			return err
+		}
 	}
 	if len(f.Matches) == 0 {
 		_, err := fmt.Fprintln(w, "_No matching artifacts._")
 		return err
 	}
-	if _, err := fmt.Fprintln(w, "| Verdict | Confidence | Tested | Artifact | Location |"); err != nil {
+	if err := renderFeatureMatchTableMD(w, r, f.Matches); err != nil {
 		return err
-	}
-	if _, err := fmt.Fprintln(w, "|---|---:|:---:|---|---|"); err != nil {
-		return err
-	}
-	for _, m := range f.Matches {
-		tested := ""
-		if m.Tested {
-			tested = fmt.Sprintf("✓ (%d)", m.TestCount)
-		}
-		if _, err := fmt.Fprintf(w, "| %s | %.2f | %s | `%s` %s | `%s:%d-%d` |\n",
-			m.Verdict, m.Confidence, tested,
-			m.Kind, escapePipes(m.Identifier), shortPath(m.File), m.StartLine, m.EndLine); err != nil {
-			return err
-		}
 	}
 	if _, err := fmt.Fprintln(w); err != nil {
 		return err
@@ -162,8 +181,82 @@ func renderFeatureMD(w io.Writer, f FeatureCoverage) error {
 		if _, err := fmt.Fprintln(w); err != nil {
 			return err
 		}
+		if err := renderSupportMD(w, r, m); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func renderFeatureMatchTableMD(w io.Writer, r *Report, matches []MatchRow) error {
+	if r.IncludeCallGraph {
+		return renderFeatureCallGraphMatchTableMD(w, matches)
+	}
+	return renderFeatureSurfaceMatchTableMD(w, matches)
+}
+
+func renderFeatureCallGraphMatchTableMD(w io.Writer, matches []MatchRow) error {
+	if _, err := fmt.Fprintln(w, "| Verdict | Confidence | Tested | SCIP Support | Artifact | Location |"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "|---|---:|:---:|---:|---|---|"); err != nil {
+		return err
+	}
+	for _, m := range matches {
+		tested := ""
+		if m.Tested {
+			tested = fmt.Sprintf("✓ (%d)", m.TestCount)
+		}
+		if _, err := fmt.Fprintf(w, "| %s | %.2f | %s | %d | `%s` %s | `%s:%d-%d` |\n",
+			m.Verdict, m.Confidence, tested, len(m.SupportingArtifacts),
+			m.Kind, escapePipes(m.Identifier), shortPath(m.File), m.StartLine, m.EndLine); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return nil
+}
+
+func renderFeatureSurfaceMatchTableMD(w io.Writer, matches []MatchRow) error {
+	if _, err := fmt.Fprintln(w, "| Verdict | Confidence | Tested | Artifact | Location |"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "|---|---:|:---:|---|---|"); err != nil {
+		return err
+	}
+	for _, m := range matches {
+		tested := ""
+		if m.Tested {
+			tested = fmt.Sprintf("✓ (%d)", m.TestCount)
+		}
+		if _, err := fmt.Fprintf(w, "| %s | %.2f | %s | `%s` %s | `%s:%d-%d` |\n",
+			m.Verdict, m.Confidence, tested,
+			m.Kind, escapePipes(m.Identifier), shortPath(m.File), m.StartLine, m.EndLine); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+func renderSupportMD(w io.Writer, r *Report, m MatchRow) error {
+	if !r.IncludeCallGraph || len(m.SupportingArtifacts) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintf(w, "**SCIP support for `%s`:**\n", m.Identifier); err != nil {
+		return err
+	}
+	for _, a := range m.SupportingArtifacts {
+		if _, err := fmt.Fprintf(w, "- depth %d `%s` %s via `%s` at `%s:%d-%d`\n",
+			a.Depth, a.Kind, escapePipes(a.Identifier), a.RelationshipKind,
+			shortPath(a.File), a.StartLine, a.EndLine); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintln(w)
+	return err
 }
 
 func renderDriftMD(w io.Writer, r *Report) error {

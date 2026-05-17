@@ -34,6 +34,86 @@ Live atomization, embedding, and judgment calls require:
 export BEDROCK_BASE_URL="https://your-krakend-bedrock-route"
 ```
 
+## Taskfile Workflow
+
+The repository includes a Go Task `Taskfile.yml`.
+
+Run the bundled offline demo:
+
+```bash
+task run
+```
+
+Run against a real FSD and Spring Boot repo:
+
+```bash
+task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo
+```
+
+That real run uses live Bedrock through `BEDROCK_BASE_URL` unless cassette
+paths are passed explicitly.
+
+Enable the optional SCIP layer during a real run:
+
+```bash
+task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo SCIP=true
+```
+
+Include SCIP call graph support artifacts in the generated report:
+
+```bash
+task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo SCIP=true INCLUDE_CALL_GRAPH=true
+```
+
+Or use a prebuilt SCIP index:
+
+```bash
+task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo SCIP_INDEX=/path/to/index.scip
+```
+
+## Zip Distribution
+
+Build a platform-specific zip:
+
+```bash
+task dist
+```
+
+or:
+
+```bash
+make dist
+```
+
+The archive is written under `./dist/`, for example:
+
+```text
+dist/fsdtrace-darwin-arm64.zip
+```
+
+The zip contains:
+
+- `bin/fsdtrace`
+- `Taskfile.yml`
+- `README.md`
+- `demo/fsdtrace.db`
+- bundled sample FSD, sample Spring app, and recorded Bedrock cassettes
+
+After unzip:
+
+```bash
+cd fsdtrace-darwin-arm64
+task run
+```
+
+`task run` renders the bundled offline demo report from `demo/fsdtrace.db` and
+writes the HTML report to `./trace/`. For a real project, use
+`task trace FSD=... REPO=...`.
+
+The zip does not bundle Go Task itself, a JDK, `scip-java`, Maven, Gradle, or a
+Bedrock gateway. Go Task is required only for the Taskfile workflow. The
+`fsdtrace` binary itself is included.
+
 ## Role of scip-java
 
 `scip-java` provides compiler-aware Java semantics for richer code indexing.
@@ -51,6 +131,23 @@ The code indexer has two layers:
 
 Tree-sitter answers: what Spring surfaces exist?
 `scip-java` helps answer: what does this code call or depend on?
+
+The semantic call graph is optional because the tree-sitter layer can already
+find the Spring public surface that fsdtrace must validate. That keeps the
+default workflow usable with only the fsdtrace binary and source files. The
+SCIP layer improves matching quality by adding compiler-aware relationships,
+but it needs a JDK, `scip-java`, and a target project that has already been
+compiled.
+
+Reports are surface-only by default. To show SCIP-derived support artifacts
+reachable from directly implemented matches, pass:
+
+```bash
+./bin/fsdtrace --db ./fsdtrace.db report --format html --out ./trace/ --include-call-graph
+```
+
+This option enriches the report; it does not reclassify FRs or orphan public
+surfaces as covered.
 
 Basic indexing works without `scip-java`:
 

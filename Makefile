@@ -1,4 +1,4 @@
-.PHONY: build test smoke install lint cross generate proto
+.PHONY: build test smoke install lint cross generate proto dist
 
 GO        ?= go
 PKG        := ./...
@@ -28,3 +28,6 @@ cross:
 
 generate:
 	$(GO) generate $(PKG)
+
+dist:
+	task dist

@@ -11,9 +11,10 @@ import (
 
 func newReportCmd() *cobra.Command {
 	var (
-		format string
-		outDir string
-		runID  string
+		format           string
+		outDir           string
+		runID            string
+		includeCallGraph bool
 	)
 	cmd := &cobra.Command{
 		Use:   "report",
@@ -39,7 +40,9 @@ the chosen format into --out:
 				return err
 			}
 
-			rep, err := report.Load(ctx, d, runID)
+			rep, err := report.LoadWithOptions(ctx, d, runID, report.Options{
+				IncludeCallGraph: includeCallGraph,
+			})
 			if err != nil {
 				return err
 			}
@@ -69,6 +72,7 @@ the chosen format into --out:
 	cmd.Flags().StringVar(&format, "format", "md", "output format: md|csv|html|json")
 	cmd.Flags().StringVar(&outDir, "out", "./trace/", "output directory")
 	cmd.Flags().StringVar(&runID, "run-id-of-matches", "", "match run to report on (default: latest)")
+	cmd.Flags().BoolVar(&includeCallGraph, "include-call-graph", false, "include SCIP relationship support artifacts in the report")
 	return cmd
 }
 

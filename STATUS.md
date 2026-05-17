@@ -77,6 +77,15 @@ cross-platform release automation, both deferred per SPEC).
 - 2026-05-16 — Added `README.md` with build/pipeline basics and a
   `scip-java` section explaining its role in semantic Java indexing and
   call graph relationship population.
+- 2026-05-17 — Added Go Task workflows and a platform-specific zip
+  distribution path. After unzip, `task run` renders the bundled demo DB
+  into an HTML report; `task trace FSD=... REPO=...` runs a real project,
+  with `SCIP=true` or `SCIP_INDEX=...` enabling the optional semantic call
+  graph layer.
+- 2026-05-17 — Added optional SCIP call graph report enrichment. The
+  `report --include-call-graph` flag and Taskfile `INCLUDE_CALL_GRAPH=true`
+  attach reachable support artifacts to directly implemented matches without
+  changing default surface-only coverage classification.
 
 ## Next steps (post-Phase 7)
 

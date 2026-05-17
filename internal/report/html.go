@@ -57,12 +57,13 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
 </head><body>
 <h1>Coverage — run <code>{{.RunID}}</code></h1>
 <p>Generated {{.Generated.Format "2006-01-02 15:04:05"}} UTC.</p>
+{{if .IncludeCallGraph}}<p>SCIP call graph support is included for implemented matches.</p>{{end}}
 
 <h2>Roll-up</h2>
 <table>
- <tr><th>Section</th><th class="num">Total</th><th class="num">Implemented</th><th class="num">Drifts</th><th class="num">Missing</th></tr>
+ <tr><th>Section</th><th class="num">Total</th><th class="num">Implemented</th><th class="num">Drifts</th><th class="num">Missing</th>{{if .IncludeCallGraph}}<th class="num">SCIP Support</th>{{end}}</tr>
 {{range .Sections}}
- <tr><td>{{.Name}}</td><td class="num">{{.Total}}</td><td class="num">{{.Implemented}}</td><td class="num">{{.Drifts}}</td><td class="num">{{.Missing}}</td></tr>
+ <tr><td>{{.Name}}</td><td class="num">{{.Total}}</td><td class="num">{{.Implemented}}</td><td class="num">{{.Drifts}}</td><td class="num">{{.Missing}}</td>{{if $.IncludeCallGraph}}<td class="num">{{.SupportingArtifacts}}</td>{{end}}</tr>
 {{end}}
 </table>
 
@@ -74,20 +75,27 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
  <summary>{{.ID}} — {{.Title}}
   <span class="badge b-{{.Status}}">{{upper .Status}}</span>
   {{if .TestedAny}}<span class="badge" title="At least one matched artifact has tests">tested</span>{{end}}
+  {{if and $.IncludeCallGraph .SupportingArtifacts}}<span class="badge" title="SCIP support artifacts">{{.SupportingArtifacts}} support</span>{{end}}
  </summary>
  {{if .Matches}}
  <table>
-  <tr><th>Verdict</th><th>Confidence</th><th>Tested</th><th>Artifact</th><th>Location</th></tr>
+  <tr><th>Verdict</th><th>Confidence</th><th>Tested</th>{{if $.IncludeCallGraph}}<th>SCIP Support</th>{{end}}<th>Artifact</th><th>Location</th></tr>
   {{range .Matches}}
   <tr>
    <td><span class="badge b-{{.Verdict}}">{{.Verdict}}</span></td>
    <td class="num">{{printf "%.2f" .Confidence}}</td>
    <td class="num">{{if .Tested}}✓ ({{.TestCount}}){{end}}</td>
+   {{if $.IncludeCallGraph}}<td class="num">{{len .SupportingArtifacts}}</td>{{end}}
    <td><code>{{.Kind}}</code> {{.Identifier}}</td>
    <td><code>{{.File}}:{{.StartLine}}-{{.EndLine}}</code></td>
   </tr>
   {{range .Evidence}}
-  <tr><td colspan="5" class="ev">↳ <code>{{.File}}:{{.Start}}-{{.End}}</code> {{if .Note}}— {{.Note}}{{end}}</td></tr>
+  <tr><td colspan="{{if $.IncludeCallGraph}}6{{else}}5{{end}}" class="ev">↳ <code>{{.File}}:{{.Start}}-{{.End}}</code> {{if .Note}}— {{.Note}}{{end}}</td></tr>
+  {{end}}
+  {{if $.IncludeCallGraph}}
+  {{range .SupportingArtifacts}}
+  <tr><td colspan="6" class="ev">↳ SCIP depth {{.Depth}} <code>{{.Kind}}</code> {{.Identifier}} via <code>{{.RelationshipKind}}</code> at <code>{{.File}}:{{.StartLine}}-{{.EndLine}}</code></td></tr>
+  {{end}}
   {{end}}
   {{end}}
  </table>

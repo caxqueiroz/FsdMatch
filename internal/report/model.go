@@ -34,50 +34,76 @@ const (
 
 // Report is the per-run traceability matrix.
 type Report struct {
-	RunID     string      `json:"run_id"`
-	Generated time.Time   `json:"generated_at"`
-	Sections  []Section   `json:"sections"`
-	Drift     []DriftRow  `json:"drift"`
-	Orphans   []OrphanRow `json:"orphans"`
+	RunID            string      `json:"run_id"`
+	Generated        time.Time   `json:"generated_at"`
+	IncludeCallGraph bool        `json:"include_call_graph"`
+	Sections         []Section   `json:"sections"`
+	Drift            []DriftRow  `json:"drift"`
+	Orphans          []OrphanRow `json:"orphans"`
+}
+
+// Options controls optional report enrichment.
+type Options struct {
+	// IncludeCallGraph expands implemented matches through SCIP-derived
+	// relationships and attaches reachable support artifacts.
+	IncludeCallGraph bool
+	// MaxCallDepth limits relationship traversal. Zero uses the default.
+	MaxCallDepth int
 }
 
 // Section groups features by their fsd_section value. "(unsectioned)"
 // for rows with empty section.
 type Section struct {
-	Name        string            `json:"name"`
-	Features    []FeatureCoverage `json:"features"`
-	Total       int               `json:"total"`
-	Implemented int               `json:"implemented"`
-	Drifts      int               `json:"drifts"`
-	Missing     int               `json:"missing"`
+	Name                string            `json:"name"`
+	Features            []FeatureCoverage `json:"features"`
+	Total               int               `json:"total"`
+	Implemented         int               `json:"implemented"`
+	Drifts              int               `json:"drifts"`
+	Missing             int               `json:"missing"`
+	SupportingArtifacts int               `json:"supporting_artifacts"`
 }
 
 // FeatureCoverage is one FR with its matches and overall status.
 type FeatureCoverage struct {
-	ID        string     `json:"id"`
-	Title     string     `json:"title"`
-	Section   string     `json:"section"`
-	Status    Status     `json:"status"`
-	Matches   []MatchRow `json:"matches"`
-	TestedAny bool       `json:"tested_any"`
+	ID                  string     `json:"id"`
+	Title               string     `json:"title"`
+	Section             string     `json:"section"`
+	Status              Status     `json:"status"`
+	Matches             []MatchRow `json:"matches"`
+	TestedAny           bool       `json:"tested_any"`
+	SupportingArtifacts int        `json:"supporting_artifacts"`
 }
 
 // MatchRow is one matches-table row joined with its artifact.
 type MatchRow struct {
-	ArtifactID    int64      `json:"artifact_id"`
-	Kind          string     `json:"kind"`
-	Identifier    string     `json:"identifier"`
-	File          string     `json:"file"`
-	StartLine     int        `json:"start_line"`
-	EndLine       int        `json:"end_line"`
-	Verdict       string     `json:"verdict"`
-	Confidence    float64    `json:"confidence"`
-	Evidence      []Evidence `json:"evidence"`
-	Notes         string     `json:"notes"`
-	Tested        bool       `json:"tested"`
-	TestCount     int        `json:"test_count"`
-	Model         string     `json:"model"`
-	PromptVersion string     `json:"prompt_version"`
+	ArtifactID          int64             `json:"artifact_id"`
+	Kind                string            `json:"kind"`
+	Identifier          string            `json:"identifier"`
+	File                string            `json:"file"`
+	StartLine           int               `json:"start_line"`
+	EndLine             int               `json:"end_line"`
+	Verdict             string            `json:"verdict"`
+	Confidence          float64           `json:"confidence"`
+	Evidence            []Evidence        `json:"evidence"`
+	Notes               string            `json:"notes"`
+	Tested              bool              `json:"tested"`
+	TestCount           int               `json:"test_count"`
+	Model               string            `json:"model"`
+	PromptVersion       string            `json:"prompt_version"`
+	SupportingArtifacts []SupportArtifact `json:"supporting_artifacts,omitempty"`
+}
+
+// SupportArtifact is a code artifact reachable from a directly
+// implemented match through SCIP-derived relationships.
+type SupportArtifact struct {
+	ArtifactID       int64  `json:"artifact_id"`
+	Kind             string `json:"kind"`
+	Identifier       string `json:"identifier"`
+	File             string `json:"file"`
+	StartLine        int    `json:"start_line"`
+	EndLine          int    `json:"end_line"`
+	Depth            int    `json:"depth"`
+	RelationshipKind string `json:"relationship_kind"`
 }
 
 // Evidence mirrors the JSON shape stored in matches.evidence.
@@ -120,6 +146,11 @@ type OrphanRow struct {
 // because the orphans + features-by-section view is independently
 // useful.
 func Load(ctx context.Context, d *db.DB, runID string) (*Report, error) {
+	return LoadWithOptions(ctx, d, runID, Options{})
+}
+
+// LoadWithOptions assembles a Report with optional enrichment.
+func LoadWithOptions(ctx context.Context, d *db.DB, runID string, opts Options) (*Report, error) {
 	if runID == "" {
 		var ns sql.NullString
 		err := d.SQL().QueryRowContext(ctx,
@@ -136,8 +167,9 @@ func Load(ctx context.Context, d *db.DB, runID string) (*Report, error) {
 	}
 
 	r := &Report{
-		RunID:     runID,
-		Generated: time.Now().UTC(),
+		RunID:            runID,
+		Generated:        time.Now().UTC(),
+		IncludeCallGraph: opts.IncludeCallGraph,
 	}
 
 	feats, err := loadFeatures(ctx, d)
@@ -147,6 +179,11 @@ func Load(ctx context.Context, d *db.DB, runID string) (*Report, error) {
 	matchesByFeature, err := loadMatches(ctx, d, runID)
 	if err != nil {
 		return nil, err
+	}
+	if opts.IncludeCallGraph {
+		if err := attachCallGraph(ctx, d, matchesByFeature, opts.MaxCallDepth); err != nil {
+			return nil, err
+		}
 	}
 
 	// Group features by section.
@@ -160,6 +197,7 @@ func Load(ctx context.Context, d *db.DB, runID string) (*Report, error) {
 			Matches: ms,
 			Status:  classify(ms),
 		}
+		fc.SupportingArtifacts = supportCount(ms)
 		for _, m := range ms {
 			if m.Tested {
 				fc.TestedAny = true
@@ -180,6 +218,7 @@ func Load(ctx context.Context, d *db.DB, runID string) (*Report, error) {
 			case StatusMissing:
 				s.Missing++
 			}
+			s.SupportingArtifacts += f.SupportingArtifacts
 		}
 		r.Sections = append(r.Sections, s)
 	}
@@ -195,6 +234,8 @@ func Load(ctx context.Context, d *db.DB, runID string) (*Report, error) {
 	}
 	return r, nil
 }
+
+const defaultMaxCallDepth = 3
 
 type featureRow struct {
 	ID, Title, Section string
@@ -258,6 +299,100 @@ func loadMatches(ctx context.Context, d *db.DB, runID string) (map[string][]Matc
 		out[featID] = append(out[featID], m)
 	}
 	return out, rows.Err()
+}
+
+func attachCallGraph(ctx context.Context, d *db.DB, matchesByFeature map[string][]MatchRow, maxDepth int) error {
+	if maxDepth <= 0 {
+		maxDepth = defaultMaxCallDepth
+	}
+	edges, err := loadCallGraphEdges(ctx, d)
+	if err != nil {
+		return err
+	}
+	if len(edges) == 0 {
+		return nil
+	}
+	for featureID, matches := range matchesByFeature {
+		for i := range matches {
+			if matches[i].Verdict != "implements" {
+				continue
+			}
+			matches[i].SupportingArtifacts = reachableSupport(matches[i].ArtifactID, edges, maxDepth)
+		}
+		matchesByFeature[featureID] = matches
+	}
+	return nil
+}
+
+func loadCallGraphEdges(ctx context.Context, d *db.DB) (map[int64][]SupportArtifact, error) {
+	rows, err := d.SQL().QueryContext(ctx, `
+		SELECT r.from_artifact, r.kind,
+		       ca.id, ca.kind, ca.identifier, ca.file, ca.start_line, ca.end_line
+		  FROM relationships r
+		  JOIN code_artifacts ca ON ca.id = r.to_artifact
+		 ORDER BY r.from_artifact, ca.id`)
+	if err != nil {
+		return nil, fmt.Errorf("load call graph relationships: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[int64][]SupportArtifact{}
+	for rows.Next() {
+		var (
+			from int64
+			a    SupportArtifact
+		)
+		if err := rows.Scan(&from, &a.RelationshipKind, &a.ArtifactID, &a.Kind,
+			&a.Identifier, &a.File, &a.StartLine, &a.EndLine); err != nil {
+			return nil, err
+		}
+		out[from] = append(out[from], a)
+	}
+	return out, rows.Err()
+}
+
+func reachableSupport(start int64, edges map[int64][]SupportArtifact, maxDepth int) []SupportArtifact {
+	type queued struct {
+		id    int64
+		depth int
+	}
+	seen := map[int64]struct{}{start: {}}
+	queue := []queued{{id: start}}
+	var out []SupportArtifact
+
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if next.depth >= maxDepth {
+			continue
+		}
+		for _, edge := range edges[next.id] {
+			if _, ok := seen[edge.ArtifactID]; ok {
+				continue
+			}
+			seen[edge.ArtifactID] = struct{}{}
+			edge.Depth = next.depth + 1
+			out = append(out, edge)
+			queue = append(queue, queued{id: edge.ArtifactID, depth: edge.Depth})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Depth != out[j].Depth {
+			return out[i].Depth < out[j].Depth
+		}
+		return out[i].ArtifactID < out[j].ArtifactID
+	})
+	return out
+}
+
+func supportCount(ms []MatchRow) int {
+	seen := map[int64]struct{}{}
+	for _, m := range ms {
+		for _, a := range m.SupportingArtifacts {
+			seen[a.ArtifactID] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 func loadDrift(ctx context.Context, d *db.DB, runID string) ([]DriftRow, error) {

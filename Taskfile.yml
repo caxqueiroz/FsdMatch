@@ -1,0 +1,115 @@
+version: '3'
+
+vars:
+  BIN: '{{.BIN | default "./bin/fsdtrace"}}'
+  DB: '{{.DB | default "./fsdtrace.db"}}'
+  OUT: '{{.OUT | default "./trace"}}'
+  FSD: '{{.FSD | default "./testdata/fsd-sample.md"}}'
+  REPO: '{{.REPO | default "./testdata/sample-spring-app"}}'
+  DEMO_FSD_CASSETTE: './testdata/fsd-sample.cassette.json'
+  DEMO_INDEX_CASSETTE: './testdata/sample-spring-app.cassette.json'
+  DEMO_MATCH_CASSETTE: './testdata/match.cassette.json'
+  FSD_CASSETTE: '{{.FSD_CASSETTE | default ""}}'
+  INDEX_CASSETTE: '{{.INDEX_CASSETTE | default ""}}'
+  MATCH_CASSETTE: '{{.MATCH_CASSETTE | default ""}}'
+  REPORT_FORMAT: '{{.REPORT_FORMAT | default "html"}}'
+  INCLUDE_CALL_GRAPH: '{{.INCLUDE_CALL_GRAPH | default "false"}}'
+  SCIP: '{{.SCIP | default "false"}}'
+  SCIP_INDEX: '{{.SCIP_INDEX | default ""}}'
+  DIST_OS:
+    sh: go env GOOS
+  DIST_ARCH:
+    sh: go env GOARCH
+  DIST_NAME: 'fsdtrace-{{.DIST_OS}}-{{.DIST_ARCH}}'
+  DIST_DIR: './dist/{{.DIST_NAME}}'
+
+tasks:
+  default:
+    desc: Run the bundled offline sample
+    cmds:
+      - task: run
+
+  build:
+    desc: Build the fsdtrace binary
+    cmds:
+      - CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o {{.BIN}} ./cmd/fsdtrace
+
+  test:
+    desc: Run the Go race-test suite
+    cmds:
+      - go test -race ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  run:
+    desc: Run the bundled sample pipeline with recorded Bedrock cassettes
+    deps:
+      - build
+    cmds:
+      - '{{.BIN}} --db "{{.DB}}" init'
+      - '{{.BIN}} --db "{{.DB}}" ingest fsd "{{.FSD}}" --cassette "{{.DEMO_FSD_CASSETTE}}"'
+      - '{{.BIN}} --db "{{.DB}}" index code "{{.REPO}}" --cassette "{{.DEMO_INDEX_CASSETTE}}"'
+      - '{{.BIN}} --db "{{.DB}}" match --cassette "{{.DEMO_MATCH_CASSETTE}}"'
+      - '{{.BIN}} --db "{{.DB}}" report --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
+
+  trace:
+    desc: Run fsdtrace against a real FSD and Spring repo
+    deps:
+      - build
+    cmds:
+      - |
+        if [ "{{.FSD}}" = "./testdata/fsd-sample.md" ] || [ "{{.REPO}}" = "./testdata/sample-spring-app" ]; then
+          echo "usage: task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo"
+          echo "set BEDROCK_BASE_URL or pass cassette vars for offline playback"
+          exit 2
+        fi
+      - '{{.BIN}} --db "{{.DB}}" init'
+      - '{{.BIN}} --db "{{.DB}}" ingest fsd "{{.FSD}}"{{if .FSD_CASSETTE}} --cassette "{{.FSD_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" index code "{{.REPO}}"{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .SCIP_INDEX}} --scip-index "{{.SCIP_INDEX}}"{{end}}{{if .INDEX_CASSETTE}} --cassette "{{.INDEX_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" match{{if .MATCH_CASSETTE}} --cassette "{{.MATCH_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" report --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
+
+  status:
+    desc: Show the current fsdtrace database summary
+    deps:
+      - build
+    cmds:
+      - '{{.BIN}} --db "{{.DB}}" status'
+
+  mcp:
+    desc: Start the MCP server over stdio
+    deps:
+      - build
+    cmds:
+      - '{{.BIN}} --db "{{.DB}}" mcp serve'
+
+  dist:
+    desc: Build a zip that runs with task run after unzip
+    deps:
+      - build
+    cmds:
+      - rm -rf "{{.DIST_DIR}}" "./dist/{{.DIST_NAME}}.zip"
+      - mkdir -p "{{.DIST_DIR}}/bin" "{{.DIST_DIR}}/testdata"
+      - cp "{{.BIN}}" "{{.DIST_DIR}}/bin/fsdtrace"
+      - cp README.md "{{.DIST_DIR}}/README.md"
+      - cp packaging/Taskfile.yml "{{.DIST_DIR}}/Taskfile.yml"
+      - cp testdata/fsd-sample.md "{{.DIST_DIR}}/testdata/fsd-sample.md"
+      - cp testdata/fsd-sample.cassette.json "{{.DIST_DIR}}/testdata/fsd-sample.cassette.json"
+      - cp testdata/sample-spring-app.cassette.json "{{.DIST_DIR}}/testdata/sample-spring-app.cassette.json"
+      - cp testdata/match.cassette.json "{{.DIST_DIR}}/testdata/match.cassette.json"
+      - cp -R testdata/sample-spring-app "{{.DIST_DIR}}/testdata/sample-spring-app"
+      - mkdir -p "{{.DIST_DIR}}/demo"
+      - '{{.BIN}} --db "{{.DIST_DIR}}/demo/fsdtrace.db" init'
+      - '{{.BIN}} --db "{{.DIST_DIR}}/demo/fsdtrace.db" ingest fsd "./testdata/fsd-sample.md" --cassette "./testdata/fsd-sample.cassette.json"'
+      - '{{.BIN}} --db "{{.DIST_DIR}}/demo/fsdtrace.db" index code "./testdata/sample-spring-app" --cassette "./testdata/sample-spring-app.cassette.json"'
+      - '{{.BIN}} --db "{{.DIST_DIR}}/demo/fsdtrace.db" match --cassette "./testdata/match.cassette.json"'
+      - cd dist && zip -qr "{{.DIST_NAME}}.zip" "{{.DIST_NAME}}"
+      - echo "wrote ./dist/{{.DIST_NAME}}.zip"
+
+  clean:
+    desc: Remove generated local outputs
+    cmds:
+      - rm -rf "{{.DB}}" "{{.DB}}-shm" "{{.DB}}-wal" "{{.OUT}}"
