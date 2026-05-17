@@ -210,7 +210,7 @@ func (ix *Indexer) embedArtifacts(ctx context.Context, arts []Artifact, rowIDs [
 	return nil
 }
 
-// EmbeddingText is the canonical text fed to Titan for an artifact.
+// EmbeddingText is the canonical text fed to the embedding model for an artifact.
 func EmbeddingText(a Artifact) string {
 	var b strings.Builder
 	b.WriteString(a.Kind)

@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS runs (
 
 -- ============ EMBEDDING CACHE ============
 CREATE TABLE IF NOT EXISTS embedding_cache (
-  key          TEXT PRIMARY KEY,        -- sha256(model + text)
+  key          TEXT PRIMARY KEY,        -- sha256(model config + text)
   model        TEXT NOT NULL,
   dim          INTEGER NOT NULL,
   embedding    BLOB NOT NULL,           -- float32 packed
@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
 );
 
 -- ============ VEC0 VIRTUAL TABLES ============
--- Titan v2 default dimension is 1024.
+-- Fixed vector dimension for the current embedding index.
 CREATE VIRTUAL TABLE IF NOT EXISTS feature_vec USING vec0(
   embedding float[1024]
 );

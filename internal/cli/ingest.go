@@ -37,7 +37,7 @@ func newIngestFsdCmd() *cobra.Command {
 		Use:   "fsd <path>",
 		Short: "Atomize an FSD file into FR objects and embed them",
 		Long: `Splits the FSD by anchor (default FR-\d+), calls Claude on Bedrock to
-extract structured Functional Requirements, embeds each FR via Titan v2,
+extract structured Functional Requirements, embeds each FR via Bedrock,
 and stores both in the SQLite database. Re-runs are idempotent: features
 are upserted by id and feature_vec rows replaced.
 
@@ -79,7 +79,7 @@ and offline smoke runs.`,
 				return err
 			}
 
-			emb := embed.NewTitanEmbedder(bedrock, embeddingModel)
+			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeDocument)
 			atomizer := fsd.NewAtomizer(d, bedrock, emb,
 				fsd.WithModel(atomizerModel),
 				fsd.WithLogger(slog.Default()))
@@ -99,7 +99,7 @@ and offline smoke runs.`,
 	}
 	c.Flags().StringVar(&anchorPattern, "anchor-pattern", fsd.DefaultAnchorPattern, "regex used to split chunks")
 	c.Flags().StringVar(&atomizerModel, "atomizer-model", "", "Bedrock Claude model id for atomization (flag > env > config > default)")
-	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
+	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return c
 }

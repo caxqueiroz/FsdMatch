@@ -15,7 +15,7 @@ import (
 // ErrCacheMiss is returned by Cache.Get when the entry is absent.
 var ErrCacheMiss = errors.New("embedding cache miss")
 
-// CacheKey is the deterministic key for an (model, text) pair.
+// CacheKey is the deterministic key for a (model config, text) pair.
 // SHA-256 keeps it short and collision-resistant.
 func CacheKey(model, text string) string {
 	h := sha256.New()

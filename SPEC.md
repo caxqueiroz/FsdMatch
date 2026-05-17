@@ -38,7 +38,7 @@ This document is the authoritative design. Implementation must follow it; deviat
 | CLI framework | `github.com/spf13/cobra` |
 | Config | `github.com/spf13/viper` (env + flags + config file) |
 | Logging | `log/slog` (stdlib) |
-| LLM access | HTTP to KrakenD route → Amazon Bedrock (Anthropic + Titan embeddings) |
+| LLM access | HTTP to KrakenD route → Amazon Bedrock (Anthropic + configurable 1024-dim embeddings; Titan default, Cohere supported) |
 
 No FAISS. No native shared libraries beyond what tree-sitter compiles in. Build and release artifacts are CGO-enabled. Cross-compilation is not a current acceptance requirement; producing non-native artifacts requires an explicit C cross-toolchain setup for the target platform.
 
@@ -243,7 +243,7 @@ CREATE TABLE runs (
 
 -- ============ EMBEDDING CACHE ============
 CREATE TABLE embedding_cache (
-  key          TEXT PRIMARY KEY,        -- sha256(model + text)
+  key          TEXT PRIMARY KEY,        -- sha256(model config + text)
   model        TEXT NOT NULL,
   dim          INTEGER NOT NULL,
   embedding    BLOB NOT NULL,           -- float32 packed
@@ -251,7 +251,7 @@ CREATE TABLE embedding_cache (
 );
 
 -- ============ VEC0 VIRTUAL TABLES ============
--- Titan v2 default dimension is 1024. Adjust at create time.
+-- Fixed vector dimension for the current embedding index. Adjust at create time.
 CREATE VIRTUAL TABLE feature_vec USING vec0(
   embedding float[1024]
 );
@@ -280,7 +280,7 @@ CREATE VIRTUAL TABLE artifact_vec USING vec0(
 - Split the document on FR anchors (default regex `FR-\d+` or H2/H3 sections). User can override with `--anchor-pattern`.
 - For each chunk, call Bedrock Claude (via KrakenD) with a structured-output prompt that returns the FR fields.
 - Embedding text = `title + "\n" + description + "\n" + acceptance criteria`.
-- Embed via Bedrock Titan v2.
+- Embed via the configured Bedrock embedding adapter. Titan v2 is the default; Cohere Embed v3/v4 is supported when vectors are 1024-dimensional.
 - Cache both LLM responses and embeddings keyed by sha256 of input to make re-runs idempotent.
 
 The atomization prompt is in `internal/fsd/prompt.go` and versioned. Output schema is strict JSON matching `features` columns.
@@ -319,9 +319,11 @@ Three sublayers writing to the same DB transaction.
 ### 7.3 Embedder (`internal/embed`)
 
 - HTTP client targeting `BEDROCK_BASE_URL` (env). User's KrakenD route handles AWS SigV4, model routing, and SSE pass-through.
-- Default model: `amazon.titan-embed-text-v2:0`. Dimension: 1024.
+- Default model: `amazon.titan-embed-text-v2:0`. Stored vector dimension: 1024.
+- Provider adapters are selected from the model ID. `cohere.embed-english-v3`, `cohere.embed-multilingual-v3`, and `cohere.embed-v4` use Cohere request/response shapes; v4 is invoked with `output_dimension=1024`.
+- Providers with purpose-specific retrieval modes must embed stored corpus rows as documents and lookup text as queries. Cohere uses `search_document` for `feature_vec`/`artifact_vec` rows and `search_query` for matcher/MCP search vectors.
 - Batch up to 25 texts per request.
-- All embeddings cached in `embedding_cache` keyed by `sha256(model + text)`.
+- All embeddings cached in `embedding_cache` keyed by `sha256(model config + text)` so provider-specific options such as Cohere `input_type` and output dimension do not collide.
 - Exponential backoff with jitter on 429/503. Max 5 retries.
 - Per-run token budget cap (configurable). Aborts the run with a clear error if exceeded.
 

@@ -86,6 +86,11 @@ cross-platform release automation, both deferred per SPEC).
   `report --include-call-graph` flag and Taskfile `INCLUDE_CALL_GRAPH=true`
   attach reachable support artifacts to directly implemented matches without
   changing default surface-only coverage classification.
+- 2026-05-17 — Replaced Titan-specific embedding construction with a
+  Bedrock embedding adapter factory. Titan remains the default, while Cohere
+  Embed v3/v4 model IDs now use Cohere request/response shapes. Cohere stored
+  rows are embedded with `search_document`, matcher/MCP lookup vectors use
+  `search_query`, and Cohere v4 is forced to the existing 1024-dim vec0 schema.
 
 ## Next steps (post-Phase 7)
 

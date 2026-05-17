@@ -23,7 +23,7 @@ func newEmbedCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "embed",
-		Short: "Compute embeddings via Bedrock Titan and populate vec0 (Phase 2/3)",
+		Short: "Compute embeddings via Bedrock and populate vec0",
 		Long: `Recomputes vec0 rows for existing features and/or code artifacts.
 This is useful after importing rows, changing the embedding model, or
 repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
@@ -55,7 +55,7 @@ repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
 			if err != nil {
 				return err
 			}
-			emb := embed.NewTitanEmbedder(bedrock, embeddingModel)
+			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeDocument)
 			summary, err := embedExistingRows(ctx, d, emb, what)
 			if err != nil {
 				return err
@@ -68,7 +68,7 @@ repairing a database whose feature_vec/artifact_vec tables are incomplete.`,
 		},
 	}
 	cmd.Flags().StringVar(&what, "what", "all", "what to embed: features|artifacts|all")
-	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock Titan model id for embeddings (flag > env > config > default)")
+	cmd.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
 	cmd.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return cmd
 }
