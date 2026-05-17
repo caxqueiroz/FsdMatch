@@ -368,6 +368,8 @@ Generates the traceability matrix in four formats. Default output dir `./trace/`
 - `markdown.go`: human-readable matrix, FR-by-FR with evidence snippets.
 - `csv.go`: machine-readable, one row per match.
 - `html.go`: same as markdown but static HTML with collapsible sections.
+  When `--include-call-graph` is enabled, implemented matches with SCIP
+  support also render an inline SVG call graph rooted at the matched artifact.
 - `json.go`: full dump for downstream tooling.
 
 Coverage rollup per FSD section. Drift section listing all `drifts` verdicts. Orphans section listing artifacts with no `implements` mapping.

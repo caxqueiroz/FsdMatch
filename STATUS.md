@@ -124,6 +124,10 @@ cross-platform release automation, both deferred per SPEC).
   `fsdtrace trace github` now accept `--match-concurrency N`; the default stays
   serial (`1`), while higher values overlap per-FR retrieval/judgment and keep
   all SQLite writes serialized through `internal/db.Writer`.
+- 2026-05-17 — Added inline SVG SCIP graphs to HTML reports. When
+  `--include-call-graph` is enabled, each implemented match with support
+  artifacts now shows a small dependency graph rooted at the matched artifact,
+  alongside the existing precise file:line support rows.
 
 ## Next steps (post-Phase 7)
 

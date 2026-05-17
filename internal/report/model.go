@@ -96,6 +96,7 @@ type MatchRow struct {
 // SupportArtifact is a code artifact reachable from a directly
 // implemented match through SCIP-derived relationships.
 type SupportArtifact struct {
+	FromArtifactID   int64  `json:"from_artifact_id,omitempty"`
 	ArtifactID       int64  `json:"artifact_id"`
 	Kind             string `json:"kind"`
 	Identifier       string `json:"identifier"`
@@ -346,6 +347,7 @@ func loadCallGraphEdges(ctx context.Context, d *db.DB) (map[int64][]SupportArtif
 			&a.Identifier, &a.File, &a.StartLine, &a.EndLine); err != nil {
 			return nil, err
 		}
+		a.FromArtifactID = from
 		out[from] = append(out[from], a)
 	}
 	return out, rows.Err()

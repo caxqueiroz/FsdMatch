@@ -336,6 +336,32 @@ func TestWriteHTML_EmitsCollapsibleSections(t *testing.T) {
 	}
 }
 
+func TestWriteHTML_IncludesCallGraphSVGWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	d := setupReportDB(t)
+	seedReportFixture(t, d)
+	r, err := LoadWithOptions(ctx, d, "run-1", Options{IncludeCallGraph: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := WriteHTML(r, out); err != nil {
+		t.Fatal(err)
+	}
+	html := mustReadFile(t, filepath.Join(out, "index.html"))
+	for _, want := range []string{
+		`<svg class="scip-graph"`,
+		`SCIP call graph support for POST /api/v1/notes`,
+		`data-artifact-id="101"`,
+		`data-from-artifact-id="101" data-to-artifact-id="104"`,
+		`com.example.NoteService.create`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("html missing %q", want)
+		}
+	}
+}
+
 func TestParseNotesDecorations(t *testing.T) {
 	cases := []struct {
 		in    string

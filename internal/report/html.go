@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // WriteHTML writes a single index.html under outDir. Static, no JS,
@@ -34,6 +35,7 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
 		}
 		return string(s)
 	},
+	"scipGraph": renderSCIPGraph,
 }).Parse(`<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
@@ -53,6 +55,14 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
  summary { cursor: pointer; font-weight: 600; }
  code { background:#f4f4f4; padding:1px 4px; border-radius:3px; }
  .ev { font-size: 12px; color:#555; margin-left: 1.2rem; }
+ .graph-cell { background:#fbfbfb; padding:.6rem; }
+ .scip-graph { display:block; max-width:100%; border:1px solid #ddd; background:#fff; border-radius:6px; }
+ .scip-edge { stroke:#888; stroke-width:1.4; }
+ .scip-node rect { fill:#f8f9fa; stroke:#bbb; stroke-width:1; }
+ .scip-node-root rect { fill:#eef6ff; stroke:#7aa7d9; }
+ .scip-node-kind { font-size:10px; fill:#666; font-weight:700; text-transform:uppercase; }
+ .scip-node-label { font-size:11px; fill:#222; }
+ .scip-depth { font-size:10px; fill:#777; }
 </style>
 </head><body>
 <h1>Coverage — run <code>{{.RunID}}</code></h1>
@@ -93,6 +103,9 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
   <tr><td colspan="{{if $.IncludeCallGraph}}6{{else}}5{{end}}" class="ev">↳ <code>{{.File}}:{{.Start}}-{{.End}}</code> {{if .Note}}— {{.Note}}{{end}}</td></tr>
   {{end}}
   {{if $.IncludeCallGraph}}
+  {{if .SupportingArtifacts}}
+  <tr><td colspan="6" class="graph-cell">{{scipGraph .}}</td></tr>
+  {{end}}
   {{range .SupportingArtifacts}}
   <tr><td colspan="6" class="ev">↳ SCIP depth {{.Depth}} <code>{{.Kind}}</code> {{.Identifier}} via <code>{{.RelationshipKind}}</code> at <code>{{.File}}:{{.StartLine}}-{{.EndLine}}</code></td></tr>
   {{end}}
@@ -139,3 +152,126 @@ var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
 
 </body></html>
 `))
+
+const (
+	scipGraphMargin = 24
+	scipGraphNodeW  = 190
+	scipGraphNodeH  = 42
+	scipGraphColGap = 240
+	scipGraphRowGap = 70
+)
+
+type graphPosition struct {
+	x int
+	y int
+}
+
+func renderSCIPGraph(m MatchRow) template.HTML {
+	if len(m.SupportingArtifacts) == 0 {
+		return ""
+	}
+	counts := map[int]int{0: 1}
+	maxDepth := 0
+	for _, a := range m.SupportingArtifacts {
+		counts[a.Depth]++
+		if a.Depth > maxDepth {
+			maxDepth = a.Depth
+		}
+	}
+	maxRows := 1
+	for _, n := range counts {
+		if n > maxRows {
+			maxRows = n
+		}
+	}
+	width := scipGraphMargin*2 + scipGraphNodeW + scipGraphColGap*maxDepth
+	height := scipGraphMargin*2 + scipGraphNodeH + scipGraphRowGap*(maxRows-1)
+	if height < 120 {
+		height = 120
+	}
+
+	positions := map[int64]graphPosition{
+		m.ArtifactID: {
+			x: scipGraphMargin,
+			y: height/2 - scipGraphNodeH/2,
+		},
+	}
+	seenAtDepth := map[int]int{}
+	for _, a := range m.SupportingArtifacts {
+		idx := seenAtDepth[a.Depth]
+		seenAtDepth[a.Depth]++
+		columnRows := counts[a.Depth]
+		yOffset := (maxRows - columnRows) * scipGraphRowGap / 2
+		positions[a.ArtifactID] = graphPosition{
+			x: scipGraphMargin + scipGraphColGap*a.Depth,
+			y: scipGraphMargin + yOffset + idx*scipGraphRowGap,
+		}
+	}
+
+	var b strings.Builder
+	title := "SCIP call graph support for " + compactText(m.Identifier)
+	_, _ = fmt.Fprintf(&b,
+		`<svg class="scip-graph" role="img" aria-label="%s" viewBox="0 0 %d %d" width="100%%" height="%d">`,
+		template.HTMLEscapeString(title), width, height, height)
+	_, _ = fmt.Fprintf(&b, `<title>%s</title>`, template.HTMLEscapeString(title))
+	for _, a := range m.SupportingArtifacts {
+		from := positions[m.ArtifactID]
+		if pos, ok := positions[a.FromArtifactID]; ok {
+			from = pos
+		}
+		to := positions[a.ArtifactID]
+		_, _ = fmt.Fprintf(&b,
+			`<line class="scip-edge" data-from-artifact-id="%d" data-to-artifact-id="%d" x1="%d" y1="%d" x2="%d" y2="%d"/>`,
+			a.FromArtifactID, a.ArtifactID,
+			from.x+scipGraphNodeW, from.y+scipGraphNodeH/2,
+			to.x, to.y+scipGraphNodeH/2)
+	}
+	writeGraphNode(&b, positions[m.ArtifactID], m.ArtifactID, m.Kind, m.Identifier, 0, true)
+	for _, a := range m.SupportingArtifacts {
+		writeGraphNode(&b, positions[a.ArtifactID], a.ArtifactID, a.Kind, a.Identifier, a.Depth, false)
+	}
+	b.WriteString(`</svg>`)
+	// #nosec G203 -- dynamic SVG labels are HTML-escaped before writing.
+	return template.HTML(b.String())
+}
+
+func writeGraphNode(
+	b *strings.Builder,
+	pos graphPosition,
+	artifactID int64,
+	kind string,
+	identifier string,
+	depth int,
+	root bool,
+) {
+	class := "scip-node"
+	if root {
+		class += " scip-node-root"
+	}
+	_, _ = fmt.Fprintf(b,
+		`<g class="%s" data-artifact-id="%d" transform="translate(%d %d)">`,
+		class, artifactID, pos.x, pos.y)
+	_, _ = fmt.Fprintf(b, `<rect width="%d" height="%d" rx="6" ry="6"/>`, scipGraphNodeW, scipGraphNodeH)
+	nodeKind := compactText(kind)
+	if root {
+		nodeKind = "matched " + nodeKind
+	}
+	_, _ = fmt.Fprintf(b, `<text class="scip-node-kind" x="10" y="16">%s</text>`, template.HTMLEscapeString(shortText(nodeKind, 28)))
+	_, _ = fmt.Fprintf(b, `<text class="scip-node-label" x="10" y="32">%s</text>`, template.HTMLEscapeString(shortText(compactText(identifier), 34)))
+	if depth > 0 {
+		_, _ = fmt.Fprintf(b, `<text class="scip-depth" x="%d" y="16">d%d</text>`, scipGraphNodeW-24, depth)
+	}
+	b.WriteString(`</g>`)
+}
+
+func compactText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func shortText(s string, maxLen int) string {
+	if maxLen <= 3 || len([]rune(s)) <= maxLen {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:maxLen-3]) + "..."
+}

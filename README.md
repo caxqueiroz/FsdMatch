@@ -116,6 +116,10 @@ Include SCIP call graph support artifacts in the generated report:
 task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo SCIP=true INCLUDE_CALL_GRAPH=true
 ```
 
+HTML reports generated with `--include-call-graph` include inline SVG call
+graphs for implemented matches with SCIP support, while retaining the detailed
+text rows for exact file:line evidence.
+
 Or use a prebuilt SCIP index:
 
 ```bash
