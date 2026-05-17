@@ -1,5 +1,5 @@
 // Package match runs the per-FR matching pipeline: anchor extraction →
-// vec0 retrieval → Bedrock Claude judgment → test cross-check, with the
+// vec0 retrieval → model judgment → test cross-check, with the
 // hard rule from SPEC §7.4 that any verdict missing file:line evidence
 // is downgraded to "unrelated".
 package match

@@ -96,13 +96,42 @@ cross-platform release automation, both deferred per SPEC).
   and runs the existing init/ingest/index/match/report pipeline. Added a
   Spring PetClinic sample FSD under `examples/petclinic/`, Taskfile
   `trace-github` shortcuts, and bumped the reported MCP/CLI version to 1.0.0.
+- 2026-05-17 — Added provider-selectable model access. Bedrock remains the
+  default path through `BEDROCK_BASE_URL`, while `--provider openai` or
+  `FSDTRACE_PROVIDER=openai` uses OpenAI directly with `OPENAI_API_KEY`.
+  OpenAI generation defaults to `gpt-5.5`; OpenAI embeddings default to
+  `text-embedding-3-large` with `dimensions=1024` so the existing vec0 schema
+  is unchanged. The CLI, GitHub trace wrapper, and MCP rematch/search paths all
+  resolve provider-specific defaults without breaking Bedrock cassettes.
+  Taskfile workflows accept `PROVIDER=openai` for the same path.
+- 2026-05-17 — Broadened the default FSD anchor pattern from numeric-only
+  `FR-\d+` to scoped FR identifiers such as `FR-HOME-1` and `FR-I18N-3`.
+  The parser also stops a final FR chunk at the next same/higher-level
+  markdown section so trailing Data Model/NFR sections are not folded into
+  the last functional requirement.
+- 2026-05-17 — Added deterministic matcher reranking. Retrieval now builds a
+  larger internal pool from anchors plus vec0 KNN, reranks by anchor matches,
+  identifier/class/method/source/file term overlap, and vector distance, then
+  sends only the final `--top-k` candidates to the judgment model. This keeps
+  OpenAI prompts smaller without relying solely on raw vector order.
+- 2026-05-17 — Added batched judgment and incomplete-response retry. OpenAI
+  judgment now sends candidates in batches of 8 with a 12k output budget; if a
+  provider reports an incomplete response, the matcher recursively splits that
+  batch and retries. The match prompt was bumped to `match-v2`: models now
+  return only `implements`/`drifts` rows, and omitted candidates are treated as
+  `unrelated` by the caller.
+- 2026-05-17 — Added optional FR-level match parallelism. `fsdtrace match` and
+  `fsdtrace trace github` now accept `--match-concurrency N`; the default stays
+  serial (`1`), while higher values overlap per-FR retrieval/judgment and keep
+  all SQLite writes serialized through `internal/db.Writer`.
 
 ## Next steps (post-Phase 7)
 
 - 2026-05-16 — Model IDs are configurable through flags, env, or `fsdtrace.yaml`.
   Resolution order is `flag > env > config file > default`; supported env vars:
-  `FSDTRACE_EMBEDDING_MODEL`, `FSDTRACE_ATOMIZER_MODEL`,
-  `FSDTRACE_JUDGMENT_MODEL`, and `FSDTRACE_REJUDGE_MODEL`.
+  `FSDTRACE_PROVIDER`, `FSDTRACE_EMBEDDING_MODEL`,
+  `FSDTRACE_ATOMIZER_MODEL`, `FSDTRACE_JUDGMENT_MODEL`, and
+  `FSDTRACE_REJUDGE_MODEL`.
 - Wire a real Bedrock cassette for the Phase 1 `make smoke` end-to-end (currently it just runs `init`). Best done when the smoke needs to exercise live judgment too.
 - Phase 7 leaves Grafana/ClickHouse for a future request. The data already lives in SQLite and the JSON report is lossless, so a downstream consumer can pick it up at any time.
 - Once a real Spring repo + `scip-java` are available, exercise the live SCIP merge path to confirm `relationships` populate as expected.

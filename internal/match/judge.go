@@ -7,28 +7,44 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
-// Judge calls Bedrock Claude with one FR and its candidate artifacts
+// Judge calls a configured model with one FR and its candidate artifacts
 // and returns the per-candidate verdicts. Enforces the SPEC §7.4 hard
 // rule: any verdict missing concrete evidence is downgraded to
 // "unrelated" before the result reaches callers.
 type Judge struct {
-	bedrock *embed.BedrockClient
-	model   string
-	maxTok  int
+	generator llm.Generator
+	model     string
+	maxTok    int
+}
+
+// JudgeOption configures a Judge.
+type JudgeOption func(*Judge)
+
+// WithJudgeMaxTokens overrides the per-call max output tokens.
+func WithJudgeMaxTokens(n int) JudgeOption {
+	return func(j *Judge) {
+		if n > 0 {
+			j.maxTok = n
+		}
+	}
 }
 
 // NewJudge builds a Judge.
-func NewJudge(bedrock *embed.BedrockClient, model string) *Judge {
+func NewJudge(generator llm.Generator, model string, opts ...JudgeOption) *Judge {
 	if model == "" {
 		model = DefaultJudgmentModel
 	}
-	return &Judge{bedrock: bedrock, model: model, maxTok: 4096}
+	j := &Judge{generator: generator, model: model, maxTok: 4096}
+	for _, o := range opts {
+		o(j)
+	}
+	return j
 }
 
-// Model returns the Bedrock model id this judge will invoke.
+// Model returns the model id this judge will invoke.
 func (j *Judge) Model() string { return j.model }
 
 // JudgeFeature returns one Match per candidate. Candidates not present
@@ -38,19 +54,15 @@ func (j *Judge) JudgeFeature(ctx context.Context, fr FRSnapshot, anchors []Ancho
 		return nil, nil
 	}
 
-	req := bedrockMessage{
-		AnthropicVersion: BedrockAnthropicVersion,
-		MaxTokens:        j.maxTok,
-		System:           JudgmentSystem,
-		Messages: []bedrockMessageEntry{
-			{Role: "user", Content: BuildJudgmentUser(fr, anchors, candidates)},
-		},
-	}
-	var resp bedrockMessageResponse
-	if err := j.bedrock.Invoke(ctx, j.model, req, &resp); err != nil {
+	text, err := j.generator.Generate(ctx, llm.GenerateRequest{
+		Model:     j.model,
+		System:    JudgmentSystem,
+		User:      BuildJudgmentUser(fr, anchors, candidates),
+		MaxTokens: j.maxTok,
+	})
+	if err != nil {
 		return nil, fmt.Errorf("judge invoke: %w", err)
 	}
-	text := joinResponseText(resp)
 	if text == "" {
 		return nil, errors.New("judge: empty response")
 	}
@@ -135,36 +147,6 @@ type judgmentEntry struct {
 	Confidence float64    `json:"confidence"`
 	Evidence   []Evidence `json:"evidence"`
 	Notes      string     `json:"notes"`
-}
-
-type bedrockMessage struct {
-	AnthropicVersion string                `json:"anthropic_version"`
-	MaxTokens        int                   `json:"max_tokens"`
-	System           string                `json:"system,omitempty"`
-	Messages         []bedrockMessageEntry `json:"messages"`
-}
-
-type bedrockMessageEntry struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type bedrockMessageResponse struct {
-	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	} `json:"content"`
-	StopReason string `json:"stop_reason"`
-}
-
-func joinResponseText(r bedrockMessageResponse) string {
-	var b strings.Builder
-	for _, c := range r.Content {
-		if c.Type == "text" {
-			b.WriteString(c.Text)
-		}
-	}
-	return strings.TrimSpace(b.String())
 }
 
 func stripFence(s string) string {

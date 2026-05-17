@@ -1,5 +1,5 @@
 // Package fsd parses an FSD document into atomic Functional Requirement
-// chunks and then into structured Feature rows via the Bedrock atomizer.
+// chunks and then into structured Feature rows via the configured atomizer.
 //
 // Phase 2 supports markdown only. PDF and DOCX are deferred to a later
 // phase per SPEC §7.1.
@@ -13,9 +13,11 @@ import (
 	"strings"
 )
 
-// DefaultAnchorPattern matches "FR-001", "FR-042", etc. Users can
-// override via the --anchor-pattern flag.
-const DefaultAnchorPattern = `FR-\d+`
+// DefaultAnchorPattern matches numeric FR ids ("FR-001") and scoped FR
+// ids ("FR-OWN-1", "FR-I18N-3"). The word boundary prevents matching
+// "FR-PERF-1" inside non-functional ids like "NFR-PERF-1".
+// Users can override via the --anchor-pattern flag.
+const DefaultAnchorPattern = `\bFR(?:-[A-Z0-9]+)*-\d+\b`
 
 // Chunk is one slice of the FSD, headed by an anchor that appears
 // somewhere on the first line.
@@ -48,15 +50,18 @@ func ParseMarkdown(raw, pattern string) ([]Chunk, error) {
 	}
 
 	type startIdx struct {
-		line    int
-		anchor  string
-		section string
+		line         int
+		anchor       string
+		section      string
+		sectionLevel int
 	}
 
 	var (
-		section string
-		starts  []startIdx
-		lines   []string
+		section      string
+		sectionLevel int
+		starts       []startIdx
+		lines        []string
+		headings     []int
 	)
 
 	scanner := bufio.NewScanner(strings.NewReader(raw))
@@ -64,15 +69,24 @@ func ParseMarkdown(raw, pattern string) ([]Chunk, error) {
 	for lineNum := 1; scanner.Scan(); lineNum++ {
 		l := scanner.Text()
 		lines = append(lines, l)
+		headings = append(headings, 0)
 		if m := headingRe.FindStringSubmatch(l); m != nil {
+			level := len(m[1])
+			headings[len(headings)-1] = level
 			// Treat headings without anchors as section markers.
 			if !anchorRe.MatchString(l) {
 				section = m[2]
+				sectionLevel = level
 				continue
 			}
 		}
 		if a := anchorRe.FindString(l); a != "" {
-			starts = append(starts, startIdx{line: lineNum, anchor: a, section: section})
+			starts = append(starts, startIdx{
+				line:         lineNum,
+				anchor:       a,
+				section:      section,
+				sectionLevel: sectionLevel,
+			})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -84,6 +98,14 @@ func ParseMarkdown(raw, pattern string) ([]Chunk, error) {
 		end := len(lines)
 		if i+1 < len(starts) {
 			end = starts[i+1].line - 1
+		}
+		if s.sectionLevel > 0 {
+			for line := s.line + 1; line <= end; line++ {
+				if headings[line-1] > 0 && headings[line-1] <= s.sectionLevel {
+					end = line - 1
+					break
+				}
+			}
 		}
 		body := strings.Join(lines[s.line-1:end], "\n")
 		out = append(out, Chunk{

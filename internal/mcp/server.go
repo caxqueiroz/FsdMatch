@@ -2,7 +2,7 @@
 // Code can query coverage, drift, and orphan endpoints directly.
 //
 // Hard constraint (SPEC §10): startup must stay under ~200ms cold.
-// Therefore the DB and Bedrock clients are opened lazily — the first
+// Therefore the DB and model clients are opened lazily — the first
 // request that needs them pays the cost, not Init.
 package mcp
 
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,27 +21,41 @@ import (
 
 	"github.com/cax/fsdtrace/internal/db"
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
 // Version is the fsdtrace server version reported via the MCP
 // initialize handshake.
 const Version = "1.0.0"
 
-// EnvBedrockBaseURL mirrors the CLI env name; tools that need Bedrock
-// (search + rematch) read it on first use.
+// EnvBedrockBaseURL mirrors the CLI env name; tools using provider=bedrock
+// read it on first use.
 const EnvBedrockBaseURL = "BEDROCK_BASE_URL"
+
+const (
+	// ProviderBedrock keeps the original KrakenD -> Bedrock behavior.
+	ProviderBedrock = "bedrock"
+	// ProviderOpenAI uses OpenAI directly for generation and embeddings.
+	ProviderOpenAI = "openai"
+	// EnvOpenAIAPIKey is the direct OpenAI API key used by provider=openai.
+	EnvOpenAIAPIKey = "OPENAI_API_KEY" // #nosec G101 -- env var name, not a credential.
+)
 
 // Config is the per-server configuration passed to NewServer.
 type Config struct {
 	// DBPath is the SQLite file the server reads from. Required.
 	DBPath string
+	// Provider selects bedrock or openai. Empty defaults to bedrock.
+	Provider string
 	// BedrockBaseURL overrides the env value when non-empty.
 	BedrockBaseURL string
+	// OpenAIBaseURL overrides the OpenAI API URL when non-empty.
+	OpenAIBaseURL string
 	// EmbeddingModel overrides the default embedding model when non-empty.
 	EmbeddingModel string
-	// JudgmentModel overrides the default Claude model when non-empty.
+	// JudgmentModel overrides the default judgment model when non-empty.
 	JudgmentModel string
-	// HTTPClient is used by Bedrock; tests inject a recorder.
+	// HTTPClient is used by model providers; tests inject a recorder.
 	HTTPClient embed.HTTPDoer
 }
 
@@ -53,10 +68,10 @@ type Server struct {
 	openDB      *db.DB
 	openDBClose func()
 
-	openBedrockOnce sync.Once
-	openBedrockErr  error
-	openBedrock     *embed.BedrockClient
-	openEmbedder    embed.Embedder
+	openModelsOnce sync.Once
+	openModelsErr  error
+	openGenerator  llm.Generator
+	openEmbedder   embed.Embedder
 }
 
 // NewServer builds the MCP server, registers tools and resources, and
@@ -149,40 +164,32 @@ func (s *Server) WithDB(d *db.DB) {
 	s.openDBOnce.Do(func() {})
 }
 
-// Bedrock returns the lazily-built BedrockClient + embedder. Returns
-// an explanatory error when no base URL is configured.
-func (s *Server) Bedrock(_ context.Context) (*embed.BedrockClient, embed.Embedder, error) {
-	s.openBedrockOnce.Do(func() {
-		baseURL := s.cfg.BedrockBaseURL
-		if baseURL == "" {
-			baseURL = os.Getenv(EnvBedrockBaseURL)
+// Models returns the lazily-built generator + query embedder. Returns
+// an explanatory error when the selected provider is not configured.
+func (s *Server) Models(_ context.Context) (llm.Generator, embed.Embedder, error) {
+	s.openModelsOnce.Do(func() {
+		switch providerName(s.cfg.Provider) {
+		case ProviderOpenAI:
+			s.openGenerator, s.openEmbedder, s.openModelsErr = s.openOpenAIModels()
+		default:
+			s.openGenerator, s.openEmbedder, s.openModelsErr = s.openBedrockModels()
 		}
-		if baseURL == "" {
-			s.openBedrockErr = fmt.Errorf("mcp: %s not set; set it to the KrakenD route to enable embedding-based tools", EnvBedrockBaseURL)
-			return
-		}
-		opts := []embed.ClientOption{}
-		if s.cfg.HTTPClient != nil {
-			opts = append(opts, embed.WithHTTPClient(s.cfg.HTTPClient))
-		} else {
-			opts = append(opts, embed.WithHTTPClient(&http.Client{Timeout: 60 * time.Second}))
-		}
-		c, err := embed.NewClient(baseURL, opts...)
-		if err != nil {
-			s.openBedrockErr = err
-			return
-		}
-		s.openBedrock = c
-		s.openEmbedder = embed.NewBedrockEmbedder(c, s.cfg.EmbeddingModel, embed.PurposeQuery)
 	})
-	return s.openBedrock, s.openEmbedder, s.openBedrockErr
+	return s.openGenerator, s.openEmbedder, s.openModelsErr
 }
 
 // WithBedrock pre-installs Bedrock dependencies (used by tests).
 func (s *Server) WithBedrock(c *embed.BedrockClient, e embed.Embedder) {
-	s.openBedrock = c
+	s.openGenerator = llm.NewBedrockGenerator(c)
 	s.openEmbedder = e
-	s.openBedrockOnce.Do(func() {})
+	s.openModelsOnce.Do(func() {})
+}
+
+// WithModels pre-installs provider-neutral model dependencies.
+func (s *Server) WithModels(g llm.Generator, e embed.Embedder) {
+	s.openGenerator = g
+	s.openEmbedder = e
+	s.openModelsOnce.Do(func() {})
 }
 
 // Close releases the lazy DB if one was opened. Safe to call multiple
@@ -198,4 +205,60 @@ func (s *Server) Close() {
 // result with the error flag set.
 func resultErr(err error) *mcp.CallToolResult {
 	return mcp.NewToolResultErrorf("%s", err.Error())
+}
+
+func (s *Server) openBedrockModels() (llm.Generator, embed.Embedder, error) {
+	baseURL := s.cfg.BedrockBaseURL
+	if baseURL == "" {
+		baseURL = os.Getenv(EnvBedrockBaseURL)
+	}
+	if baseURL == "" {
+		return nil, nil, fmt.Errorf("mcp: %s not set; set it to the KrakenD route to enable embedding-based tools", EnvBedrockBaseURL)
+	}
+	opts := []embed.ClientOption{}
+	if s.cfg.HTTPClient != nil {
+		opts = append(opts, embed.WithHTTPClient(s.cfg.HTTPClient))
+	} else {
+		opts = append(opts, embed.WithHTTPClient(&http.Client{Timeout: 60 * time.Second}))
+	}
+	c, err := embed.NewClient(baseURL, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return llm.NewBedrockGenerator(c), embed.NewBedrockEmbedder(c, s.cfg.EmbeddingModel, embed.PurposeQuery), nil
+}
+
+func (s *Server) openOpenAIModels() (llm.Generator, embed.Embedder, error) {
+	apiKey := os.Getenv(EnvOpenAIAPIKey)
+	if apiKey == "" {
+		return nil, nil, fmt.Errorf("mcp: %s not set; set it to use provider=openai", EnvOpenAIAPIKey)
+	}
+	genOpts := []llm.OpenAIOption{}
+	embOpts := []embed.OpenAIEmbedderOption{}
+	if s.cfg.OpenAIBaseURL != "" {
+		genOpts = append(genOpts, llm.WithOpenAIBaseURL(s.cfg.OpenAIBaseURL))
+		embOpts = append(embOpts, embed.WithOpenAIEmbedderBaseURL(s.cfg.OpenAIBaseURL))
+	}
+	if s.cfg.HTTPClient != nil {
+		genOpts = append(genOpts, llm.WithOpenAIHTTPClient(s.cfg.HTTPClient))
+		embOpts = append(embOpts, embed.WithOpenAIEmbedderHTTPClient(s.cfg.HTTPClient))
+	}
+	g, err := llm.NewOpenAIClient(apiKey, genOpts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	e, err := embed.NewOpenAIEmbedder(apiKey, s.cfg.EmbeddingModel, embed.PurposeQuery, embOpts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return g, e, nil
+}
+
+func providerName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case ProviderOpenAI:
+		return ProviderOpenAI
+	default:
+		return ProviderBedrock
+	}
 }

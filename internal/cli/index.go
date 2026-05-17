@@ -30,25 +30,33 @@ func newIndexCodeCmd() *cobra.Command {
 		scipJavaBin    string
 		embeddingModel string
 		cassettePath   string
+		providerFlag   string
 	)
 	c := &cobra.Command{
 		Use:   "code <repo>",
 		Short: "Index a Spring Boot repo: harvest annotations, optionally merge SCIP",
 		Long: `Walks <repo> for .java files, harvests Spring annotations and JUnit tests
-into code_artifacts and tests, and embeds each artifact via Bedrock.
+into code_artifacts and tests, and embeds each artifact via the configured
+provider.
 
 If --scip-index points at an existing index.scip the SCIP layer fills
 scip_symbol and inserts call-graph relationships. If --run-scip-java is
 set, scip-java runs first inside <repo> to produce that file. Either
 way the indexer succeeds when the harvester does.
 
-Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
+Use --provider bedrock (default) with BEDROCK_BASE_URL, or --provider openai
+with OPENAI_API_KEY. Cassettes are Bedrock-only.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signalCtx()
 			defer cancel()
 
 			cfg, err := loadAppConfig(opts.cfgPath, nil)
+			if err != nil {
+				return err
+			}
+			var provider string
+			cfg, provider, err = resolveProvider(cfg, providerFlag, cmd.Flags().Changed("provider"))
 			if err != nil {
 				return err
 			}
@@ -75,11 +83,10 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 				return err
 			}
 
-			bedrock, err := newBedrockClient(cassettePath, cfg)
+			emb, err := newEmbedder(provider, cassettePath, cfg, embeddingModel, embed.PurposeDocument)
 			if err != nil {
 				return err
 			}
-			emb := embed.NewBedrockEmbedder(bedrock, embeddingModel, embed.PurposeDocument)
 			indexer := code.NewIndexer(d, emb)
 
 			scipPath := scipIndexPath
@@ -111,7 +118,8 @@ Bedrock embedding access is via BEDROCK_BASE_URL or --cassette.`,
 	c.Flags().StringVar(&scipIndexPath, "scip-index", "", "path to a pre-existing index.scip (skips scip-java)")
 	c.Flags().BoolVar(&runScipJava, "run-scip-java", false, "shell out to scip-java in the repo first")
 	c.Flags().StringVar(&scipJavaBin, "scip-java-bin", "scip-java", "scip-java executable name")
-	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
+	c.Flags().StringVar(&providerFlag, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
+	c.Flags().StringVar(&embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	c.Flags().StringVar(&cassettePath, "cassette", "", "use a recorded Bedrock cassette (skips live calls)")
 	return c
 }

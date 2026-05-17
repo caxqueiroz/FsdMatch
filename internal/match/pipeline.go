@@ -7,23 +7,29 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cax/fsdtrace/internal/db"
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
 // Pipeline runs the per-FR matching pipeline end-to-end and persists
 // rows into the matches table.
 type Pipeline struct {
-	d         *db.DB
-	bedrock   *embed.BedrockClient
-	embedder  embed.Embedder
-	cache     *embed.Cache
-	retriever *Retriever
-	judge     *Judge
-	topK      int
-	logger    *slog.Logger
+	d                 *db.DB
+	generator         llm.Generator
+	embedder          embed.Embedder
+	cache             *embed.Cache
+	retriever         *Retriever
+	judge             *Judge
+	judgmentModel     string
+	judgmentMaxToken  int
+	judgmentBatchSize int
+	matchConcurrency  int
+	topK              int
+	logger            *slog.Logger
 }
 
 // PipelineOption configures a Pipeline.
@@ -32,9 +38,44 @@ type PipelineOption func(*Pipeline)
 // WithTopK overrides the default per-FR candidate cap.
 func WithTopK(k int) PipelineOption { return func(p *Pipeline) { p.topK = k } }
 
-// WithJudgmentModel overrides the Bedrock judgment model.
+// WithJudgmentModel overrides the judgment model.
 func WithJudgmentModel(m string) PipelineOption {
-	return func(p *Pipeline) { p.judge = NewJudge(p.bedrock, m) }
+	return func(p *Pipeline) {
+		p.judgmentModel = m
+		p.resetJudge()
+	}
+}
+
+// WithJudgmentMaxTokens overrides the per-call judgment output budget.
+func WithJudgmentMaxTokens(n int) PipelineOption {
+	return func(p *Pipeline) {
+		if n > 0 {
+			p.judgmentMaxToken = n
+			p.resetJudge()
+		}
+	}
+}
+
+// WithJudgmentBatchSize splits candidate judgment into smaller model
+// calls. A value <= 0 keeps the whole candidate set in one call.
+func WithJudgmentBatchSize(n int) PipelineOption {
+	return func(p *Pipeline) {
+		if n > 0 {
+			p.judgmentBatchSize = n
+		}
+	}
+}
+
+// WithMatchConcurrency controls how many FRs may be matched in parallel.
+// Values <= 1 keep the historical serial behavior.
+func WithMatchConcurrency(n int) PipelineOption {
+	return func(p *Pipeline) {
+		if n > 1 {
+			p.matchConcurrency = n
+		} else {
+			p.matchConcurrency = 1
+		}
+	}
 }
 
 // WithLogger overrides the default logger.
@@ -43,21 +84,27 @@ func WithLogger(l *slog.Logger) PipelineOption {
 }
 
 // NewPipeline constructs a Pipeline using shared infrastructure.
-func NewPipeline(d *db.DB, bedrock *embed.BedrockClient, embedder embed.Embedder, opts ...PipelineOption) *Pipeline {
+func NewPipeline(d *db.DB, generator llm.Generator, embedder embed.Embedder, opts ...PipelineOption) *Pipeline {
 	p := &Pipeline{
-		d:         d,
-		bedrock:   bedrock,
-		embedder:  embedder,
-		cache:     embed.NewCache(d),
-		retriever: NewRetriever(d),
-		judge:     NewJudge(bedrock, ""),
-		topK:      DefaultTopK,
-		logger:    slog.Default(),
+		d:                d,
+		generator:        generator,
+		embedder:         embedder,
+		cache:            embed.NewCache(d),
+		retriever:        NewRetriever(d),
+		judgmentMaxToken: 4096,
+		matchConcurrency: 1,
+		topK:             DefaultTopK,
+		logger:           slog.Default(),
 	}
+	p.resetJudge()
 	for _, o := range opts {
 		o(p)
 	}
 	return p
+}
+
+func (p *Pipeline) resetJudge() {
+	p.judge = NewJudge(p.generator, p.judgmentModel, WithJudgeMaxTokens(p.judgmentMaxToken))
 }
 
 // FeatureRow is a hydrated features row used by the pipeline.
@@ -70,8 +117,8 @@ type FeatureRow struct {
 }
 
 // RejudgeDrifts re-evaluates every "drifts" verdict produced by an
-// earlier run using a stronger judgment model (Opus by default). Each
-// drifts (feature, artifact) pair is re-judged in a fresh Bedrock call
+// earlier run using a stronger judgment model. Each drifts
+// (feature, artifact) pair is re-judged in a fresh model call
 // and the matches row is updated in place under the same run_id.
 //
 // SPEC §7.4 wording: "drifts verdicts may be re-judged by Opus in a
@@ -83,7 +130,7 @@ func (p *Pipeline) RejudgeDrifts(ctx context.Context, runID, opusModel string) (
 	if opusModel == "" {
 		opusModel = p.judge.Model()
 	}
-	rejudge := NewJudge(p.bedrock, opusModel)
+	rejudge := NewJudge(p.generator, opusModel, WithJudgeMaxTokens(p.judgmentMaxToken))
 
 	// 1. Collect all drift candidates for the run, grouped by feature.
 	pairs, err := p.loadDriftCandidates(ctx, runID)
@@ -102,7 +149,7 @@ func (p *Pipeline) RejudgeDrifts(ctx context.Context, runID, opusModel string) (
 		if err != nil {
 			return summary, fmt.Errorf("rejudge load %s: %w", featureID, err)
 		}
-		matches, err := rejudge.JudgeFeature(ctx, FRSnapshot(fr), nil, candidates)
+		matches, err := p.judgeCandidatesWith(ctx, rejudge, FRSnapshot(fr), nil, candidates)
 		if err != nil {
 			return summary, fmt.Errorf("rejudge call %s: %w", featureID, err)
 		}
@@ -210,23 +257,120 @@ func (p *Pipeline) MatchAll(ctx context.Context, runID string, featureIDs []stri
 		return nil, err
 	}
 	summary := &RunSummary{RunID: runID}
+	if p.matchConcurrency > 1 && len(frs) > 1 {
+		return p.matchAllConcurrent(ctx, runID, frs, summary)
+	}
 	for _, fr := range frs {
 		matches, err := p.MatchFeature(ctx, fr)
 		if err != nil {
 			return summary, fmt.Errorf("match %s: %w", fr.ID, err)
 		}
-		if err := p.writeMatches(ctx, runID, matches); err != nil {
-			return summary, fmt.Errorf("write %s: %w", fr.ID, err)
+		if err := p.persistFeatureMatches(ctx, runID, fr, matches, summary); err != nil {
+			return summary, err
 		}
-		summary.absorb(matches)
-		p.logger.InfoContext(ctx, "matched FR",
-			"id", fr.ID, "candidates", len(matches),
-			"implements", countVerdict(matches, VerdictImplements),
-			"drifts", countVerdict(matches, VerdictDrifts),
-			"unrelated", countVerdict(matches, VerdictUnrelated),
-		)
 	}
 	return summary, nil
+}
+
+type featureMatchResult struct {
+	feature FeatureRow
+	matches []Match
+	err     error
+}
+
+func (p *Pipeline) matchAllConcurrent(
+	ctx context.Context,
+	runID string,
+	frs []FeatureRow,
+	summary *RunSummary,
+) (*RunSummary, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	workers := p.matchConcurrency
+	if workers > len(frs) {
+		workers = len(frs)
+	}
+	jobs := make(chan FeatureRow)
+	results := make(chan featureMatchResult)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for fr := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				matches, err := p.MatchFeature(ctx, fr)
+				select {
+				case results <- featureMatchResult{feature: fr, matches: matches, err: err}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for _, fr := range frs {
+			select {
+			case jobs <- fr:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	for res := range results {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("match %s: %w", res.feature.ID, res.err)
+				cancel()
+			}
+			continue
+		}
+		if firstErr != nil {
+			continue
+		}
+		if err := p.persistFeatureMatches(ctx, runID, res.feature, res.matches, summary); err != nil {
+			if firstErr == nil {
+				firstErr = err
+				cancel()
+			}
+		}
+	}
+	if firstErr != nil {
+		return summary, firstErr
+	}
+	return summary, nil
+}
+
+func (p *Pipeline) persistFeatureMatches(
+	ctx context.Context,
+	runID string,
+	fr FeatureRow,
+	matches []Match,
+	summary *RunSummary,
+) error {
+	if err := p.writeMatches(ctx, runID, matches); err != nil {
+		return fmt.Errorf("write %s: %w", fr.ID, err)
+	}
+	summary.absorb(matches)
+	p.logger.InfoContext(ctx, "matched FR",
+		"id", fr.ID, "candidates", len(matches),
+		"implements", countVerdict(matches, VerdictImplements),
+		"drifts", countVerdict(matches, VerdictDrifts),
+		"unrelated", countVerdict(matches, VerdictUnrelated),
+	)
+	return nil
 }
 
 // MatchFeature runs the pipeline for one FR and returns the per-candidate
@@ -241,7 +385,7 @@ func (p *Pipeline) MatchFeature(ctx context.Context, fr FeatureRow) ([]Match, er
 		return nil, fmt.Errorf("embed FR: %w", err)
 	}
 
-	candidates, err := p.retriever.Retrieve(ctx, queryVec, anchors, p.topK)
+	candidates, err := p.retriever.RetrieveRanked(ctx, queryVec, anchors, embeddingTextFor(snap), p.topK)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +393,7 @@ func (p *Pipeline) MatchFeature(ctx context.Context, fr FeatureRow) ([]Match, er
 		return nil, nil
 	}
 
-	matches, err := p.judge.JudgeFeature(ctx, snap, anchors, candidates)
+	matches, err := p.judgeCandidates(ctx, snap, anchors, candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +401,70 @@ func (p *Pipeline) MatchFeature(ctx context.Context, fr FeatureRow) ([]Match, er
 		return nil, err
 	}
 	return matches, nil
+}
+
+func (p *Pipeline) judgeCandidates(
+	ctx context.Context,
+	fr FRSnapshot,
+	anchors []Anchor,
+	candidates []ArtifactCandidate,
+) ([]Match, error) {
+	return p.judgeCandidatesWith(ctx, p.judge, fr, anchors, candidates)
+}
+
+func (p *Pipeline) judgeCandidatesWith(
+	ctx context.Context,
+	judge *Judge,
+	fr FRSnapshot,
+	anchors []Anchor,
+	candidates []ArtifactCandidate,
+) ([]Match, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	batchSize := p.judgmentBatchSize
+	if batchSize <= 0 || batchSize >= len(candidates) {
+		return p.judgeBatchWithRetry(ctx, judge, fr, anchors, candidates)
+	}
+	out := make([]Match, 0, len(candidates))
+	for start := 0; start < len(candidates); start += batchSize {
+		end := start + batchSize
+		if end > len(candidates) {
+			end = len(candidates)
+		}
+		matches, err := p.judgeBatchWithRetry(ctx, judge, fr, anchors, candidates[start:end])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, matches...)
+	}
+	return out, nil
+}
+
+func (p *Pipeline) judgeBatchWithRetry(
+	ctx context.Context,
+	judge *Judge,
+	fr FRSnapshot,
+	anchors []Anchor,
+	candidates []ArtifactCandidate,
+) ([]Match, error) {
+	matches, err := judge.JudgeFeature(ctx, fr, anchors, candidates)
+	if err == nil {
+		return matches, nil
+	}
+	if !llm.IsIncomplete(err) || len(candidates) == 1 {
+		return nil, err
+	}
+	mid := len(candidates) / 2
+	left, err := p.judgeBatchWithRetry(ctx, judge, fr, anchors, candidates[:mid])
+	if err != nil {
+		return nil, err
+	}
+	right, err := p.judgeBatchWithRetry(ctx, judge, fr, anchors, candidates[mid:])
+	if err != nil {
+		return nil, err
+	}
+	return append(left, right...), nil
 }
 
 func embeddingTextFor(s FRSnapshot) string {

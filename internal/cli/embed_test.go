@@ -63,6 +63,23 @@ func TestEmbedCommandRejectsInvalidWhatBeforeBedrock(t *testing.T) {
 	}
 }
 
+func TestEmbedCommandOpenAIRequiresAPIKeyNotBedrockURL(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "openai.db")
+	t.Setenv(EnvOpenAIAPIKey, "")
+
+	_, err := executeRoot(t, "--db", dbPath, "embed", "--provider", ProviderOpenAI, "--what", "features")
+	if err == nil {
+		t.Fatal("expected missing OpenAI API key error")
+	}
+	if !strings.Contains(err.Error(), EnvOpenAIAPIKey) {
+		t.Fatalf("expected OPENAI_API_KEY hint, got %v", err)
+	}
+	if strings.Contains(err.Error(), EnvBedrockBaseURL) {
+		t.Fatalf("openai provider should not require Bedrock URL: %v", err)
+	}
+}
+
 func seedEmbedCommandDB(t *testing.T, ctx context.Context, path string) {
 	t.Helper()
 	d, err := db.Open(ctx, path)

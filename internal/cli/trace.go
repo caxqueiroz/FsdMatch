@@ -58,6 +58,12 @@ Example:
 			if err != nil {
 				return err
 			}
+			var provider string
+			cfg, provider, err = resolveProvider(cfg, o.provider, cmd.Flags().Changed("provider"))
+			if err != nil {
+				return err
+			}
+			o.provider = provider
 			o.embeddingModel = cfg.model(modelEmbedding, o.embeddingModel, cmd.Flags().Changed("embedding-model"))
 			o.atomizerModel = cfg.model(modelAtomizer, o.atomizerModel, cmd.Flags().Changed("atomizer-model"))
 			o.judgmentModel = cfg.model(modelJudgment, o.judgmentModel, cmd.Flags().Changed("judgment-model"))
@@ -84,9 +90,11 @@ Example:
 	cmd.Flags().BoolVar(&o.runScipJava, "run-scip-java", false, "shell out to scip-java in the downloaded repo before indexing")
 	cmd.Flags().StringVar(&o.scipJavaBin, "scip-java-bin", "scip-java", "scip-java executable name")
 	cmd.Flags().IntVar(&o.topK, "top-k", match.DefaultTopK, "vec0 KNN candidates to consider per FR")
-	cmd.Flags().StringVar(&o.atomizerModel, "atomizer-model", "", "Bedrock Claude model id for atomization (flag > env > config > default)")
-	cmd.Flags().StringVar(&o.judgmentModel, "judgment-model", "", "Bedrock Claude model id for judgment (flag > env > config > default)")
-	cmd.Flags().StringVar(&o.embeddingModel, "embedding-model", "", "Bedrock embedding model id (flag > env > config > default)")
+	cmd.Flags().IntVar(&o.matchConcurrency, "match-concurrency", 1, "FRs to match in parallel")
+	cmd.Flags().StringVar(&o.provider, "provider", "", "model provider: bedrock|openai (flag > env > config > default)")
+	cmd.Flags().StringVar(&o.atomizerModel, "atomizer-model", "", "model id for atomization (flag > env > config > provider default)")
+	cmd.Flags().StringVar(&o.judgmentModel, "judgment-model", "", "model id for judgment (flag > env > config > provider default)")
+	cmd.Flags().StringVar(&o.embeddingModel, "embedding-model", "", "embedding model id (flag > env > config > provider default)")
 	cmd.Flags().StringVar(&o.fsdCassette, "fsd-cassette", "", "use a recorded Bedrock cassette for FSD ingestion")
 	cmd.Flags().StringVar(&o.indexCassette, "index-cassette", "", "use a recorded Bedrock cassette for code indexing")
 	cmd.Flags().StringVar(&o.matchCassette, "match-cassette", "", "use a recorded Bedrock cassette for matching")
@@ -104,6 +112,8 @@ type traceGithubOptions struct {
 	runScipJava      bool
 	scipJavaBin      string
 	topK             int
+	matchConcurrency int
+	provider         string
 	atomizerModel    string
 	judgmentModel    string
 	embeddingModel   string
@@ -212,12 +222,15 @@ func traceIngestFSD(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubO
 	if len(chunks) == 0 {
 		return fmt.Errorf("no anchors matched %q in %s", fsd.DefaultAnchorPattern, o.fsdPath)
 	}
-	bedrock, err := newBedrockClient(o.fsdCassette, cfg)
+	generator, err := newGenerator(o.provider, o.fsdCassette, cfg)
 	if err != nil {
 		return err
 	}
-	emb := embed.NewBedrockEmbedder(bedrock, o.embeddingModel, embed.PurposeDocument)
-	atomizer := fsd.NewAtomizer(d, bedrock, emb,
+	emb, err := newEmbedder(o.provider, o.fsdCassette, cfg, o.embeddingModel, embed.PurposeDocument)
+	if err != nil {
+		return err
+	}
+	atomizer := fsd.NewAtomizer(d, generator, emb,
 		fsd.WithModel(o.atomizerModel),
 		fsd.WithLogger(slog.Default()))
 	_, err = atomizer.Ingest(ctx, chunks, runID)
@@ -232,11 +245,10 @@ func traceIndexCode(
 	o traceGithubOptions,
 	runID string,
 ) error {
-	bedrock, err := newBedrockClient(o.indexCassette, cfg)
+	emb, err := newEmbedder(o.provider, o.indexCassette, cfg, o.embeddingModel, embed.PurposeDocument)
 	if err != nil {
 		return err
 	}
-	emb := embed.NewBedrockEmbedder(bedrock, o.embeddingModel, embed.PurposeDocument)
 	indexer := code.NewIndexer(d, emb)
 
 	scipPath := ""
@@ -254,15 +266,26 @@ func traceIndexCode(
 }
 
 func traceMatch(ctx context.Context, d *db.DB, cfg appConfig, o traceGithubOptions, runID string) error {
-	bedrock, err := newBedrockClient(o.matchCassette, cfg)
+	generator, err := newGenerator(o.provider, o.matchCassette, cfg)
 	if err != nil {
 		return err
 	}
-	emb := embed.NewBedrockEmbedder(bedrock, o.embeddingModel, embed.PurposeQuery)
-	pipe := match.NewPipeline(d, bedrock, emb,
+	emb, err := newEmbedder(o.provider, o.matchCassette, cfg, o.embeddingModel, embed.PurposeQuery)
+	if err != nil {
+		return err
+	}
+	pipeOpts := []match.PipelineOption{
 		match.WithTopK(o.topK),
+		match.WithMatchConcurrency(o.matchConcurrency),
 		match.WithJudgmentModel(o.judgmentModel),
-	)
+	}
+	if o.provider == ProviderOpenAI {
+		pipeOpts = append(pipeOpts,
+			match.WithJudgmentMaxTokens(openAIJudgmentMaxTokens),
+			match.WithJudgmentBatchSize(openAIJudgmentBatchSize),
+		)
+	}
+	pipe := match.NewPipeline(d, generator, emb, pipeOpts...)
 	_, err = pipe.MatchAll(ctx, runID, nil)
 	return err
 }

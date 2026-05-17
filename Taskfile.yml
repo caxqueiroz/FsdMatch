@@ -7,6 +7,8 @@ vars:
   FSD: '{{.FSD | default "./testdata/fsd-sample.md"}}'
   REPO: '{{.REPO | default "./testdata/sample-spring-app"}}'
   GITHUB_REPO: '{{.GITHUB_REPO | default ""}}'
+  PROVIDER: '{{.PROVIDER | default ""}}'
+  MATCH_CONCURRENCY: '{{.MATCH_CONCURRENCY | default ""}}'
   DEMO_FSD_CASSETTE: './testdata/fsd-sample.cassette.json'
   DEMO_INDEX_CASSETTE: './testdata/sample-spring-app.cassette.json'
   DEMO_MATCH_CASSETTE: './testdata/match.cassette.json'
@@ -64,13 +66,13 @@ tasks:
       - |
         if [ "{{.FSD}}" = "./testdata/fsd-sample.md" ] || [ "{{.REPO}}" = "./testdata/sample-spring-app" ]; then
           echo "usage: task trace FSD=/path/to/fsd.md REPO=/path/to/spring-repo"
-          echo "set BEDROCK_BASE_URL or pass cassette vars for offline playback"
+          echo "set BEDROCK_BASE_URL, or set PROVIDER=openai and OPENAI_API_KEY"
           exit 2
         fi
       - '{{.BIN}} --db "{{.DB}}" init'
-      - '{{.BIN}} --db "{{.DB}}" ingest fsd "{{.FSD}}"{{if .FSD_CASSETTE}} --cassette "{{.FSD_CASSETTE}}"{{end}}'
-      - '{{.BIN}} --db "{{.DB}}" index code "{{.REPO}}"{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .SCIP_INDEX}} --scip-index "{{.SCIP_INDEX}}"{{end}}{{if .INDEX_CASSETTE}} --cassette "{{.INDEX_CASSETTE}}"{{end}}'
-      - '{{.BIN}} --db "{{.DB}}" match{{if .MATCH_CASSETTE}} --cassette "{{.MATCH_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" ingest fsd "{{.FSD}}"{{if .PROVIDER}} --provider "{{.PROVIDER}}"{{end}}{{if .FSD_CASSETTE}} --cassette "{{.FSD_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" index code "{{.REPO}}"{{if .PROVIDER}} --provider "{{.PROVIDER}}"{{end}}{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .SCIP_INDEX}} --scip-index "{{.SCIP_INDEX}}"{{end}}{{if .INDEX_CASSETTE}} --cassette "{{.INDEX_CASSETTE}}"{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" match{{if .PROVIDER}} --provider "{{.PROVIDER}}"{{end}}{{if .MATCH_CONCURRENCY}} --match-concurrency "{{.MATCH_CONCURRENCY}}"{{end}}{{if .MATCH_CASSETTE}} --cassette "{{.MATCH_CASSETTE}}"{{end}}'
       - '{{.BIN}} --db "{{.DB}}" report --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
 
   trace-github:
@@ -81,10 +83,10 @@ tasks:
       - |
         if [ -z "{{.GITHUB_REPO}}" ] || [ "{{.FSD}}" = "./testdata/fsd-sample.md" ]; then
           echo "usage: task trace-github GITHUB_REPO=https://github.com/owner/repo FSD=/path/to/fsd.md"
-          echo "set BEDROCK_BASE_URL or pass cassette vars for offline playback"
+          echo "set BEDROCK_BASE_URL, or set PROVIDER=openai and OPENAI_API_KEY"
           exit 2
         fi
-      - '{{.BIN}} --db "{{.DB}}" trace github "{{.GITHUB_REPO}}" --fsd "{{.FSD}}" --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .FSD_CASSETTE}} --fsd-cassette "{{.FSD_CASSETTE}}"{{end}}{{if .INDEX_CASSETTE}} --index-cassette "{{.INDEX_CASSETTE}}"{{end}}{{if .MATCH_CASSETTE}} --match-cassette "{{.MATCH_CASSETTE}}"{{end}}{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
+      - '{{.BIN}} --db "{{.DB}}" trace github "{{.GITHUB_REPO}}" --fsd "{{.FSD}}"{{if .PROVIDER}} --provider "{{.PROVIDER}}"{{end}}{{if .MATCH_CONCURRENCY}} --match-concurrency "{{.MATCH_CONCURRENCY}}"{{end}} --format "{{.REPORT_FORMAT}}" --out "{{.OUT}}"{{if eq .SCIP "true"}} --run-scip-java{{end}}{{if .FSD_CASSETTE}} --fsd-cassette "{{.FSD_CASSETTE}}"{{end}}{{if .INDEX_CASSETTE}} --index-cassette "{{.INDEX_CASSETTE}}"{{end}}{{if .MATCH_CASSETTE}} --match-cassette "{{.MATCH_CASSETTE}}"{{end}}{{if eq .INCLUDE_CALL_GRAPH "true"}} --include-call-graph{{end}}'
 
   status:
     desc: Show the current fsdtrace database summary
@@ -98,7 +100,7 @@ tasks:
     deps:
       - build
     cmds:
-      - '{{.BIN}} --db "{{.DB}}" mcp serve'
+      - '{{.BIN}} --db "{{.DB}}" mcp serve{{if .PROVIDER}} --provider "{{.PROVIDER}}"{{end}}'
 
   dist:
     desc: Build a zip that runs with task run after unzip

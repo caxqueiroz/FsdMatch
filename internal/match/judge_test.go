@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cax/fsdtrace/internal/embed"
+	"github.com/cax/fsdtrace/internal/llm"
 )
 
 // makeBedrockServer returns an httptest server that responds to any
@@ -48,7 +49,7 @@ func TestJudge_HappyPath(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	bedrock, _ := embed.NewClient(ts.URL)
-	j := NewJudge(bedrock, "fake-model")
+	j := NewJudge(llm.NewBedrockGenerator(bedrock), "fake-model")
 
 	got, err := j.JudgeFeature(context.Background(),
 		FRSnapshot{ID: "FR-1", Title: "x", Description: "y"},
@@ -85,7 +86,7 @@ func TestJudge_DowngradesNoEvidence(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	bedrock, _ := embed.NewClient(ts.URL)
-	j := NewJudge(bedrock, "fake-model")
+	j := NewJudge(llm.NewBedrockGenerator(bedrock), "fake-model")
 
 	got, err := j.JudgeFeature(context.Background(),
 		FRSnapshot{ID: "FR-2"},
@@ -112,7 +113,7 @@ func TestJudge_AbsentArtifactDefaultsToUnrelated(t *testing.T) {
 	ts := makeBedrockServer(t, []judgmentEntry{}) // model returns nothing
 	t.Cleanup(ts.Close)
 	bedrock, _ := embed.NewClient(ts.URL)
-	j := NewJudge(bedrock, "fake-model")
+	j := NewJudge(llm.NewBedrockGenerator(bedrock), "fake-model")
 
 	got, err := j.JudgeFeature(context.Background(),
 		FRSnapshot{ID: "FR-3"},
@@ -137,7 +138,7 @@ func TestJudge_RejectsInvalidVerdict(t *testing.T) {
 	})
 	t.Cleanup(ts.Close)
 	bedrock, _ := embed.NewClient(ts.URL)
-	j := NewJudge(bedrock, "fake-model")
+	j := NewJudge(llm.NewBedrockGenerator(bedrock), "fake-model")
 
 	got, err := j.JudgeFeature(context.Background(),
 		FRSnapshot{ID: "FR-4"},

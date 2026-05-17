@@ -11,7 +11,7 @@ This document is the authoritative design. Implementation must follow it; deviat
 **Goals**
 - Atomize the FSD into structured FR (Functional Requirement) objects.
 - Index the Spring Boot codebase with compiler-accurate semantics (SCIP) plus Spring annotation harvesting.
-- Match FRs to code via anchor + embedding retrieval + Claude judgment, with evidence required.
+- Match FRs to code via anchor + embedding retrieval + model judgment, with evidence required.
 - Detect drift (code that does *something similar* to the FR but not the same) and orphan code (public surface not mapped to any FR).
 - Store everything in a single SQLite file. Make it queryable from CLI and from Claude Code over MCP.
 - Re-runs are idempotent and diffable.
@@ -38,7 +38,7 @@ This document is the authoritative design. Implementation must follow it; deviat
 | CLI framework | `github.com/spf13/cobra` |
 | Config | `github.com/spf13/viper` (env + flags + config file) |
 | Logging | `log/slog` (stdlib) |
-| LLM access | HTTP to KrakenD route → Amazon Bedrock (Anthropic + configurable 1024-dim embeddings; Titan default, Cohere supported) |
+| LLM access | Provider-selectable: default HTTP to KrakenD route → Amazon Bedrock (Anthropic + configurable 1024-dim embeddings; Titan default, Cohere supported), or direct OpenAI (`OPENAI_API_KEY`) with GPT-5.5 and OpenAI embeddings |
 
 No FAISS. No native shared libraries beyond what tree-sitter compiles in. Build and release artifacts are CGO-enabled. Cross-compilation is not a current acceptance requirement; producing non-native artifacts requires an explicit C cross-toolchain setup for the target platform.
 
@@ -46,7 +46,7 @@ No FAISS. No native shared libraries beyond what tree-sitter compiles in. Build 
 
 ## 3. Architecture
 
-Single binary, one SQLite file as the source of truth. Two parallel ingestion pipelines (FSD side and code side) feed a matcher orchestrator that calls Claude. Results land in the same DB and are surfaced via CLI and MCP.
+Single binary, one SQLite file as the source of truth. Two parallel ingestion pipelines (FSD side and code side) feed a matcher orchestrator that calls the configured judgment model. Results land in the same DB and are surfaced via CLI and MCP.
 
 ```
 FSD doc ──▶ atomizer ──▶ features + embeddings ─┐
@@ -56,8 +56,8 @@ Spring Boot ──▶ indexer ──▶ artifacts + graph ──┘
 
 The matcher pipeline per FR has four stages:
 1. **Anchor match** — deterministic. Match by referenced URL, HTTP verb, topic, role, etc.
-2. **Vector retrieval** — top-K over `artifact_vec` via vec0 KNN, filtered by anchors when present.
-3. **Claude judgment** — single call per FR with all candidates and their resolved call graph; structured output of verdicts with mandatory file:line evidence.
+2. **Vector retrieval + rerank** — collect a larger internal candidate pool from anchors plus vec0 KNN, rerank deterministically with anchor, identifier, class/method, source-term, and distance signals, then keep the final top-K.
+3. **Model judgment** — batched calls over the final candidates, with structured output of non-unrelated verdicts and mandatory file:line evidence.
 4. **Test cross-check** — count and surface linked JUnit tests; flag `implemented-untested`.
 
 ---
@@ -75,7 +75,7 @@ fsdtrace/
 │   │   └── writer.go               # single-writer goroutine + channel
 │   ├── fsd/
 │   │   ├── parse.go                # markdown/docx/pdf to chunks
-│   │   └── atomizer.go             # chunks → FR objects via Bedrock
+│   │   └── atomizer.go             # chunks → FR objects via configured model
 │   ├── code/
 │   │   ├── scip.go                 # shell out to scip-java, parse protobuf
 │   │   ├── treesitter.go           # tree-sitter-java walker
@@ -83,12 +83,16 @@ fsdtrace/
 │   │   └── tests.go                # JUnit extractor + linking
 │   ├── embed/
 │   │   ├── bedrock.go              # HTTP client to KrakenD route
+│   │   ├── openai.go               # OpenAI embeddings client
 │   │   ├── cache.go                # idempotent embedding cache in SQLite
 │   │   └── titan.go                # request/response shapes
+│   ├── llm/
+│   │   ├── bedrock.go              # Anthropic-on-Bedrock generation adapter
+│   │   └── openai.go               # OpenAI Responses API generation adapter
 │   ├── match/
 │   │   ├── anchor.go               # deterministic stage-1 matchers
 │   │   ├── retrieve.go             # vec0 KNN via internal/db
-│   │   ├── judge.go                # Claude judgment call
+│   │   ├── judge.go                # judgment model call
 │   │   ├── prompt.go               # judgment prompt (versioned)
 │   │   └── pipeline.go             # orchestrate per-FR stages
 │   ├── report/
@@ -123,9 +127,9 @@ fsdtrace init                       # create DB, apply schema
 fsdtrace ingest fsd <path>          # atomize FSD into FR objects
 fsdtrace index code <repo>          # run scip-java + annotation harvest
 fsdtrace embed [--what features|artifacts|all]
-fsdtrace match [--fr FR-042] [--top-k 15]
+fsdtrace match [--fr FR-042] [--top-k 15] [--match-concurrency 1]
 fsdtrace report --format md|csv|html|json --out ./trace/
-fsdtrace trace github <url> --fsd <path>  # download GitHub repo and run full pipeline
+fsdtrace trace github <url> --fsd <path> [--match-concurrency 1]  # download GitHub repo and run full pipeline
 fsdtrace mcp serve [--transport stdio|sse]
 fsdtrace install-claude-code        # writes Claude Code MCP config entry
 fsdtrace status                     # latest run summary
@@ -283,11 +287,11 @@ CREATE VIRTUAL TABLE artifact_vec USING vec0(
 **Output**: rows in `features` plus embeddings in `feature_vec`.
 
 **Strategy**:
-- Split the document on FR anchors (default regex `FR-\d+` or H2/H3 sections). User can override with `--anchor-pattern`.
-- For each chunk, call Bedrock Claude (via KrakenD) with a structured-output prompt that returns the FR fields.
+- Split the document on FR anchors (default regex `\bFR(?:-[A-Z0-9]+)*-\d+\b`, e.g. `FR-001` or `FR-OWN-1`). User can override with `--anchor-pattern`.
+- For each chunk, call the configured generation provider with a structured-output prompt that returns the FR fields.
 - Embedding text = `title + "\n" + description + "\n" + acceptance criteria`.
-- Embed via the configured Bedrock embedding adapter. Titan v2 is the default; Cohere Embed v3/v4 is supported when vectors are 1024-dimensional.
-- Cache both LLM responses and embeddings keyed by sha256 of input to make re-runs idempotent.
+- Embed via the configured provider. Bedrock defaults to Titan v2 and also supports Cohere Embed v3/v4 when vectors are 1024-dimensional. OpenAI defaults to `text-embedding-3-large` with `dimensions=1024`.
+- Cache embeddings keyed by sha256 of model config + input so re-runs are idempotent.
 
 The atomization prompt is in `internal/fsd/prompt.go` and versioned. Output schema is strict JSON matching `features` columns.
 
@@ -324,9 +328,11 @@ Three sublayers writing to the same DB transaction.
 
 ### 7.3 Embedder (`internal/embed`)
 
-- HTTP client targeting `BEDROCK_BASE_URL` (env). User's KrakenD route handles AWS SigV4, model routing, and SSE pass-through.
-- Default model: `amazon.titan-embed-text-v2:0`. Stored vector dimension: 1024.
-- Provider adapters are selected from the model ID. `cohere.embed-english-v3`, `cohere.embed-multilingual-v3`, and `cohere.embed-v4` use Cohere request/response shapes; v4 is invoked with `output_dimension=1024`.
+- Provider is selected by `--provider`, `FSDTRACE_PROVIDER`, or config. Supported values: `bedrock` (default) and `openai`.
+- Bedrock targets `BEDROCK_BASE_URL` (env). User's KrakenD route handles AWS SigV4, model routing, and SSE pass-through.
+- Bedrock default model: `amazon.titan-embed-text-v2:0`. Cohere adapters are selected from model ID: `cohere.embed-english-v3`, `cohere.embed-multilingual-v3`, and `cohere.embed-v4` use Cohere request/response shapes; v4 is invoked with `output_dimension=1024`.
+- OpenAI targets `https://api.openai.com/v1` by default and requires `OPENAI_API_KEY`. OpenAI default embedding model: `text-embedding-3-large`, invoked with `dimensions=1024`.
+- Stored vector dimension: 1024.
 - Providers with purpose-specific retrieval modes must embed stored corpus rows as documents and lookup text as queries. Cohere uses `search_document` for `feature_vec`/`artifact_vec` rows and `search_query` for matcher/MCP search vectors.
 - Batch up to 25 texts per request.
 - All embeddings cached in `embedding_cache` keyed by `sha256(model config + text)` so provider-specific options such as Cohere `input_type` and output dimension do not collide.
@@ -343,14 +349,17 @@ func (p *Pipeline) MatchFeature(ctx context.Context, fr Feature) ([]Match, error
 
 Stages:
 1. **Anchor** (`anchor.go`): regex/keyword extraction over FR text against extracted artifacts. URL paths, HTTP verbs, topic names, role names, scheduled cron hints.
-2. **Retrieve** (`retrieve.go`): vec0 KNN top-K=15 by default, filtered by anchor candidates when present.
-3. **Judge** (`judge.go`): one Bedrock Claude call per FR. Prompt is in `prompt.go` and carries a `prompt_version` string written into `matches.prompt_version`.
+2. **Retrieve + rerank** (`retrieve.go`): collect anchor candidates plus an internal vec0 KNN pool larger than top-K, then deterministically rerank by anchor hits, query-term overlap against identifier/class/method/source/file, and vector distance. Only the final top-K=15 by default is sent to the judge.
+3. **Judge** (`judge.go`): configured model calls over candidate batches. Prompt is in `prompt.go` and carries a `prompt_version` string written into `matches.prompt_version`.
    - Required output: `[{artifact_id, verdict, confidence, evidence: [{file, start, end, note}], notes}]`
-   - Verdict ∈ `implements | drifts | unrelated`.
+   - Verdict ∈ `implements | drifts`.
+   - Unrelated candidates are omitted from the response and treated as `unrelated` by the caller.
    - No evidence → reject the verdict and downgrade to `unrelated`.
+   - If a provider reports an incomplete response, the matcher retries that batch by recursively splitting it into smaller batches.
+   - `--match-concurrency N` lets the pipeline match N FRs in parallel. It defaults to `1`; DB writes still go through `internal/db.Writer`.
 4. **Test cross-check**: count linked tests via `tests.target_artifact`. Decorate matches with `tested: bool` and `test_count`. The matches schema has no dedicated columns; the matcher persists the decoration as a suffix on `matches.notes` in the form `"…; tested=<bool> test_count=<int>"`. Reporters and the MCP `fsd_get_feature` tool strip the suffix back out at read time.
 
-The default judgment model is `anthropic.claude-sonnet-*-v2:0`. `drifts` verdicts may be re-judged by Opus in a second pass (gated by `--rejudge-drifts`).
+The default Bedrock judgment model is `anthropic.claude-sonnet-*-v2:0`. The default OpenAI generation model is `gpt-5.5`; OpenAI judgment uses smaller candidate batches by default to reduce response truncation. `drifts` verdicts may be re-judged in a second pass (gated by `--rejudge-drifts`), defaulting to Opus on Bedrock and GPT-5.5 on OpenAI.
 
 ### 7.5 Reporter (`internal/report`)
 
@@ -379,7 +388,7 @@ Coverage rollup per FSD section. Drift section listing all `drifts` verdicts. Or
 | `fsd_list_orphans` | Public artifacts (endpoints, listeners, scheduled jobs) with no FR. Filter by kind. | readOnly |
 | `fsd_drift_report` | All `drifts` verdicts with evidence. | readOnly |
 | `fsd_coverage_summary` | Counts per FSD section: implemented / drifts / missing / untested. | readOnly |
-| `fsd_rematch_feature` | Re-run the matcher for one FR. Costs one Bedrock call. | NOT readOnly |
+| `fsd_rematch_feature` | Re-run the matcher for one FR. Costs one configured judgment call. | NOT readOnly |
 
 Each tool has a clear description, JSON schema for inputs, and an output schema. Tool descriptions follow `mcp-builder` conventions: action-oriented, concise, with examples in field descriptions.
 
@@ -399,6 +408,7 @@ Resolution order: flag > env > config file > default.
 ```yaml
 # fsdtrace.yaml
 db: ./fsdtrace.db
+provider: bedrock # bedrock|openai
 bedrock:
   base_url: https://krakend.internal/v1/bedrock
   region: us-east-1
@@ -408,8 +418,15 @@ bedrock:
   rejudge_model: anthropic.claude-opus-4-v2:0
   rejudge_drifts: false
   token_budget: 2000000
+openai:
+  # Optional. Defaults to https://api.openai.com/v1.
+  base_url: https://api.openai.com/v1
+  embedding_model: text-embedding-3-large
+  atomizer_model: gpt-5.5
+  judgment_model: gpt-5.5
+  rejudge_model: gpt-5.5
 fsd:
-  anchor_pattern: 'FR-\d+'
+  anchor_pattern: '\bFR(?:-[A-Z0-9]+)*-\d+\b'
 indexer:
   scip_java_bin: scip-java
   java_project_dir: ./
@@ -421,9 +438,14 @@ mcp:
 ```
 
 Model resolution order is `flag > env > config file > default`.
-Supported model env vars:
+Provider resolution order is `--provider > FSDTRACE_PROVIDER > config file > bedrock`.
+Supported provider/model env vars:
+`FSDTRACE_PROVIDER`,
 `FSDTRACE_EMBEDDING_MODEL`, `FSDTRACE_ATOMIZER_MODEL`,
 `FSDTRACE_JUDGMENT_MODEL`, and `FSDTRACE_REJUDGE_MODEL`.
+Bedrock requires `BEDROCK_BASE_URL`; OpenAI requires `OPENAI_API_KEY`.
+`FSDTRACE_OPENAI_BASE_URL` can override the OpenAI API base URL for tests or
+compatible gateways.
 
 ---
 
@@ -465,8 +487,8 @@ Release archives should be built natively per target OS/architecture, or through
 | AOP advice (`@Around`, `@Before`) invisible to static call graph | Extract advice rows separately with `kind=advice`; surface in matcher prompt context. |
 | Reflection / `BeanFactory.getBean(String)` | Flag as `unresolved_dynamic_dispatch` artifacts; surface in orphan report. |
 | `@ConditionalOnProperty` / Spring Profiles | Harvester records conditions; matcher prompt mentions them so judgment notes "implemented under profile=prod". |
-| Bedrock call budget overrun | Per-run token budget cap; abort with clear error. |
-| Claude judgment produces no evidence | Reject verdict; downgrade to `unrelated`. Hard rule, no exceptions. |
+| Model call budget overrun | Per-run token budget cap; abort with clear error. |
+| Judgment model produces no evidence | Reject verdict; downgrade to `unrelated`. Hard rule, no exceptions. |
 | MCP stdio subprocess relaunch on Claude Code restart | Lazy DB open; no eager loading. Startup must be <200ms cold. |
 
 ---
@@ -488,7 +510,7 @@ Each phase has explicit acceptance criteria. Do not advance phases without meeti
 
 ### Phase 2 — FSD Ingestion
 - `internal/fsd/parse.go` for markdown.
-- `internal/fsd/atomizer.go` calling Bedrock Claude via `internal/embed.BedrockClient` (HTTP client to KrakenD route).
+- `internal/fsd/atomizer.go` calling the configured generation provider via the provider-neutral LLM adapter.
 - Atomizer prompt in `prompt.go` with `PromptVersion = "fsd-atomize-v1"`.
 - Embedding cache populated; FRs embedded into `feature_vec`.
 - Atomizer test against `testdata/fsd-sample.md` (5 FRs).
@@ -544,4 +566,7 @@ Each phase has explicit acceptance criteria. Do not advance phases without meeti
 - tree-sitter-java: https://github.com/tree-sitter/tree-sitter-java
 - mark3labs/mcp-go: https://github.com/mark3labs/mcp-go
 - Anthropic on Bedrock: https://docs.anthropic.com/en/api/claude-on-amazon-bedrock
+- OpenAI Responses API: https://platform.openai.com/docs/api-reference/responses/create
+- OpenAI Embeddings API: https://platform.openai.com/docs/api-reference/embeddings/create
+- OpenAI GPT-5.5 model: https://platform.openai.com/docs/models/gpt-5.5
 - MCP protocol: https://modelcontextprotocol.io/

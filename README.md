@@ -38,16 +38,43 @@ For a GitHub-hosted Spring project, use the end-to-end wrapper:
   --format html
 ```
 
-Live atomization, embedding, and judgment calls require:
+Live atomization, embedding, and judgment calls default to the existing
+Bedrock/KrakenD route:
 
 ```bash
 export BEDROCK_BASE_URL="https://your-krakend-bedrock-route"
 ```
 
-Titan v2 is the default embedding model. Override it with
-`--embedding-model`, `FSDTRACE_EMBEDDING_MODEL`, or `bedrock.embedding_model`
-in `fsdtrace.yaml`. Cohere Embed v3/v4 models are supported through the same
-Bedrock route; stored vectors remain 1024-dimensional.
+To use OpenAI directly instead:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+./bin/fsdtrace --db ./petclinic.db trace github \
+  https://github.com/spring-projects/spring-petclinic \
+  --provider openai \
+  --fsd examples/petclinic/fsd.md \
+  --out ./trace/petclinic \
+  --format html \
+  --match-concurrency 3
+```
+
+With `--provider openai`, atomization, matching, and drift rejudging default
+to `gpt-5.5`, and embeddings default to `text-embedding-3-large` with
+`dimensions=1024` to match the existing vec0 schema. Bedrock remains the
+default provider, with Titan v2 as the default embedding model and Cohere
+Embed v3/v4 supported through the same Bedrock route.
+
+OpenAI judgment uses deterministic reranking, smaller candidate batches, and
+automatic retry on incomplete responses. The final `--top-k` candidates are
+still honored, but they are judged in batches to avoid oversized JSON outputs.
+Use `--match-concurrency N` to match multiple FRs in parallel; start with
+`2` or `3` for live OpenAI runs to improve throughput without creating a large
+burst of API calls.
+
+Override models with `--embedding-model`, `--atomizer-model`,
+`--judgment-model`, `--rejudge-model`, the matching `FSDTRACE_*_MODEL` env var,
+or provider-specific config such as `bedrock.embedding_model` and
+`openai.embedding_model` in `fsdtrace.yaml`.
 
 ## Taskfile Workflow
 
@@ -72,8 +99,10 @@ task trace-github GITHUB_REPO=https://github.com/spring-projects/spring-petclini
   FSD=examples/petclinic/fsd.md OUT=./trace/petclinic
 ```
 
-That real run uses live Bedrock through `BEDROCK_BASE_URL` unless cassette
-paths are passed explicitly.
+That real run uses live Bedrock through `BEDROCK_BASE_URL` by default. Pass
+`PROVIDER=openai` to the Taskfile, or `--provider openai` to the binary, and
+set `OPENAI_API_KEY` to use OpenAI directly. Cassette paths are Bedrock-only
+and remain intended for offline tests/demos.
 
 Enable the optional SCIP layer during a real run:
 
@@ -134,9 +163,9 @@ task run
 writes the HTML report to `./trace/`. For a real project, use
 `task trace FSD=... REPO=...`.
 
-The zip does not bundle Go Task itself, a JDK, `scip-java`, Maven, Gradle, or a
-Bedrock gateway. Go Task is required only for the Taskfile workflow. The
-`fsdtrace` binary itself is included.
+The zip does not bundle Go Task itself, a JDK, `scip-java`, Maven, Gradle, a
+Bedrock gateway, or OpenAI credentials. Go Task is required only for the
+Taskfile workflow. The `fsdtrace` binary itself is included.
 
 ## Role of scip-java
 
